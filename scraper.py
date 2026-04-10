@@ -221,25 +221,47 @@ def get_pdf_url(detail_url: str) -> str | None:
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        for a in soup.find_all("a", href=True):
-            if re.search(r"\.pdf(\?|$)", a["href"], re.I):
-                return _abs(a["href"])
+        # Remove nav/header/footer so their PDFs don't pollute results
+        for tag in soup.find_all(["nav", "header", "footer",
+                                   "script", "style"]):
+            tag.decompose()
+        for tag in soup.find_all(True, {"class": re.compile(
+                r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+            tag.decompose()
 
-        for tag in soup.find_all(["embed", "iframe", "object"]):
+        # Try main content area first, fall back to full page
+        content = (
+            soup.find("div", {"class": re.compile(r"entry.content|post.content|main.content|content.area|single.content", re.I)})
+            or soup.find("main")
+            or soup.find("article")
+            or soup
+        )
+
+        # 1. Direct <a href="...pdf"> in content
+        for a in content.find_all("a", href=True):
+            href = a["href"]
+            if re.search(r"\.pdf(\?|$)", href, re.I):
+                return _abs(href)
+
+        # 2. <embed>, <iframe>, <object> in content
+        for tag in content.find_all(["embed", "iframe", "object"]):
             src = tag.get("src") or tag.get("data") or ""
             if re.search(r"\.pdf", src, re.I):
                 return _abs(src)
 
+        # 3. JS/text patterns — only inside content's HTML, not full page
+        content_html = str(content)
         for pat in [
             r'ViewerJS/#(?:https?:)?([^\s"\'<]+\.pdf[^\s"\'<]*)',
-            r'["\']([^"\']*?\.pdf)["\']',
             r'file=([^\s&"\'<]+\.pdf[^\s&"\'<]*)',
+            r'["\']([^"\']*?/(?:uploads|files|documents|notices|notification)[^"\']*?\.pdf)["\']',
         ]:
-            m = re.search(pat, r.text, re.I)
+            m = re.search(pat, content_html, re.I)
             if m:
                 c = m.group(1)
                 if len(c) > 8:
                     return _abs(c)
+
     except Exception as e:
         print(f"    PDF extraction error: {e}")
     return None
@@ -468,14 +490,16 @@ def main():
 
         print(f"\n  🆕 {n['title'][:70]}")
         print(f"     {n.get('category','')}  |  {n.get('date','')}")
+        # Mark as seen BEFORE delivering — prevents re-sends if job times out mid-run
+        seen[nid] = {
+            "title":    n["title"],
+            "date":     n.get("date", ""),
+            "category": n.get("category", ""),
+            "notified": datetime.now().isoformat(),
+        }
+        save_json(SEEN_FILE, seen)  # persist immediately
         try:
             deliver(n)
-            seen[nid] = {
-                "title":    n["title"],
-                "date":     n.get("date", ""),
-                "category": n.get("category", ""),
-                "notified": datetime.now().isoformat(),
-            }
             new_count += 1
         except Exception as e:
             print(f"    ERROR delivering: {e}")
