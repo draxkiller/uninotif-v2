@@ -3,7 +3,6 @@
 Pondicherry University — Telegram Notification Bot  v2
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✦ All 7 categories monitored
-✦ AI-powered PDF summary (Claude API)
 ✦ Multi-recipient (personal + group)
 ✦ Error alerts to admin only
 ✦ Daily heartbeat
@@ -87,7 +86,6 @@ def _fmt_wp_date(date_str: str) -> str:
         return date_str
 
 
-
 def fetch_all_notifications() -> list[dict]:
     results = _try_wp_rest_api()
     if results:
@@ -163,11 +161,9 @@ def _scrape_html() -> list[dict]:
             _extract_rows(container, f"{cat_name} {cat_emoji}", results)
 
     if not results:
-        # Last-resort: scan every <tr> on the page
         _extract_rows(soup, "General 🔔", results)
 
     if not results:
-        # Even more aggressive: grab every <a> that looks like a notification link
         print("  [HTML] No table rows found — trying link scan fallback")
         seen_links_fb: set = set()
         for a in soup.find_all("a", href=True):
@@ -222,8 +218,7 @@ def get_pdf_url(detail_url: str) -> str | None:
         soup = BeautifulSoup(r.text, "html.parser")
 
         # Remove nav/header/footer so their PDFs don't pollute results
-        for tag in soup.find_all(["nav", "header", "footer",
-                                   "script", "style"]):
+        for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
             tag.decompose()
         for tag in soup.find_all(True, {"class": re.compile(
                 r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
@@ -249,7 +244,7 @@ def get_pdf_url(detail_url: str) -> str | None:
             if re.search(r"\.pdf", src, re.I):
                 return _abs(src)
 
-        # 3. JS/text patterns — only inside content's HTML, not full page
+        # 3. JS/text patterns — only inside content's HTML
         content_html = str(content)
         for pat in [
             r'ViewerJS/#(?:https?:)?([^\s"\'<]+\.pdf[^\s"\'<]*)',
@@ -268,23 +263,44 @@ def get_pdf_url(detail_url: str) -> str | None:
 
 
 def download_pdf(pdf_url: str) -> str | None:
+    """
+    Download a PDF from pdf_url to a temp file.
+    Validates using magic bytes (%PDF) instead of Content-Type header,
+    because the university server often returns application/octet-stream
+    or other non-standard content types for valid PDFs.
+    """
     try:
         uid   = hashlib.md5(pdf_url.encode()).hexdigest()[:10]
         local = f"/tmp/pu_{uid}.pdf"
         with requests.get(pdf_url, headers=HEADERS, timeout=60, stream=True) as r:
             if r.status_code != 200:
+                print(f"    PDF download HTTP {r.status_code} — skipping")
                 return None
-            ct = r.headers.get("content-type", "")
-            if "pdf" not in ct.lower() and not re.search(r"\.pdf", pdf_url, re.I):
-                return None
-            size = 0
+            size        = 0
+            first_chunk = None
             with open(local, "wb") as f:
                 for chunk in r.iter_content(8192):
+                    if first_chunk is None:
+                        first_chunk = chunk   # capture for magic byte check
                     f.write(chunk)
                     size += len(chunk)
                     if size > 49 * 1024 * 1024:
-                        break
-        return local if Path(local).stat().st_size > 512 else None
+                        print("    PDF too large (>49 MB) — skipping")
+                        return None
+
+            # Validate actual PDF magic bytes — don't trust Content-Type
+            if not first_chunk or not first_chunk.startswith(b"%PDF"):
+                print(f"    Not a valid PDF (bad magic bytes) — skipping")
+                return None
+
+        file_size = Path(local).stat().st_size
+        if file_size <= 512:
+            print(f"    PDF too small ({file_size} bytes) — skipping")
+            return None
+
+        print(f"    PDF downloaded OK ({file_size // 1024} KB)")
+        return local
+
     except Exception as e:
         print(f"    PDF download error: {e}")
         return None
@@ -330,13 +346,6 @@ def tg_document_file(chat_id: str, path: str, caption: str) -> bool:
         )
 
 
-def tg_document_url(chat_id: str, pdf_url: str, caption: str) -> bool:
-    return _tg_post("sendDocument", chat_id, data={
-        "chat_id": chat_id, "document": pdf_url,
-        "caption": caption[:1024], "parse_mode": "HTML",
-    })
-
-
 def broadcast_text(text: str):
     """Send text to ALL configured chat IDs."""
     for cid in CHAT_IDS:
@@ -347,12 +356,6 @@ def broadcast_text(text: str):
 def broadcast_document_file(path: str, caption: str):
     for cid in CHAT_IDS:
         tg_document_file(cid, path, caption)
-        time.sleep(0.5)
-
-
-def broadcast_document_url(pdf_url: str, caption: str):
-    for cid in CHAT_IDS:
-        tg_document_url(cid, pdf_url, caption)
         time.sleep(0.5)
 
 
@@ -386,17 +389,22 @@ def deliver(n: dict):
     pdf_path = None
 
     if pdf_url:
-        print(f"    PDF → {pdf_url[:80]}")
+        print(f"    PDF found → {pdf_url[:80]}")
         pdf_path = download_pdf(pdf_url)
+        if not pdf_path:
+            print("    PDF download failed — sending text message with link instead")
 
-    sent = False
     if pdf_path:
+        print(f"    Sending PDF file to {len(CHAT_IDS)} chat(s)...")
         broadcast_document_file(pdf_path, caption)
-        sent = True
-    elif pdf_url:
-        broadcast_document_url(pdf_url, caption)
-        sent = True
-    if not sent:
+    else:
+        # No PDF file — send text. If we found a URL but couldn't download it,
+        # append it to the caption so the user can tap to open the PDF manually.
+        # (We do NOT use tg_document_url because Telegram's servers cannot fetch
+        #  PDFs from the university's server — it requires browser-like headers.)
+        if pdf_url:
+            caption += f'\n📎 <a href="{pdf_url}">Download PDF ↗</a>'
+        print(f"    Sending text message to {len(CHAT_IDS)} chat(s)...")
         broadcast_text(caption)
 
     if pdf_path:
@@ -407,13 +415,13 @@ def deliver(n: dict):
 # ─────────────────────────────────────────────────────────────
 def maybe_send_heartbeat(seen: dict):
     """Send a daily 'bot is alive' message to admin at ~8 AM IST."""
-    now   = datetime.utcnow()
+    now = datetime.utcnow()
     # IST = UTC+5:30 → 8:00 IST = 2:30 UTC
     # We only run every 5 min, so trigger between 2:30–2:35 UTC
     if not (now.hour == 2 and 30 <= now.minute < 35):
         return
 
-    hb = load_json(HEARTBEAT_FILE)
+    hb    = load_json(HEARTBEAT_FILE)
     today = now.strftime("%Y-%m-%d")
     if hb.get("last_date") == today:
         return   # already sent today
@@ -446,7 +454,7 @@ def main():
         print("ERROR: No TELEGRAM_CHAT_IDS configured.")
         return
 
-    seen = load_json(SEEN_FILE)
+    seen         = load_json(SEEN_FILE)
     is_first_run = len(seen) == 0
 
     notifications = []
@@ -460,7 +468,6 @@ def main():
 
     if is_first_run:
         if len(notifications) == 0:
-            # Scraping returned nothing — something is broken, don't silently seed 0
             err_msg = (
                 "First run completed but scraped 0 notifications.\n"
                 "The WP REST API and HTML scraper both returned empty results.\n"
@@ -468,7 +475,7 @@ def main():
             )
             print(f"\n  ❌ {err_msg}")
             alert_admin(err_msg)
-            return  # Don't save seen.json or broadcast — let it retry next run
+            return
         print(f"  ⚡ First run — seeding seen.json without sending alerts.")
 
     new_count = 0
@@ -490,6 +497,7 @@ def main():
 
         print(f"\n  🆕 {n['title'][:70]}")
         print(f"     {n.get('category','')}  |  {n.get('date','')}")
+
         # Mark as seen BEFORE delivering — prevents re-sends if job times out mid-run
         seen[nid] = {
             "title":    n["title"],
@@ -497,7 +505,8 @@ def main():
             "category": n.get("category", ""),
             "notified": datetime.now().isoformat(),
         }
-        save_json(SEEN_FILE, seen)  # persist immediately
+        save_json(SEEN_FILE, seen)   # persist immediately
+
         try:
             deliver(n)
             new_count += 1
