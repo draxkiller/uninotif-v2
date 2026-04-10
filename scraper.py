@@ -405,6 +405,15 @@ def main():
     seen = load_json(SEEN_FILE)
     is_first_run = len(seen) == 0
 
+    notifications = []
+    try:
+        notifications = fetch_all_notifications()
+    except Exception as e:
+        err_msg = f"Failed to fetch notifications: {e}"
+        print(f"  ERROR: {err_msg}")
+        alert_admin(err_msg)
+        return
+
     if is_first_run:
         if len(notifications) == 0:
             # Scraping returned nothing — something is broken, don't silently seed 0
@@ -417,14 +426,6 @@ def main():
             alert_admin(err_msg)
             return  # Don't save seen.json or broadcast — let it retry next run
         print(f"  ⚡ First run — seeding seen.json without sending alerts.")
-
-    try:
-        notifications = fetch_all_notifications()
-    except Exception as e:
-        err_msg = f"Failed to fetch notifications: {e}"
-        print(f"  ERROR: {err_msg}")
-        alert_admin(err_msg)
-        return
 
     new_count = 0
     errors    = 0
