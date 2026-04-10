@@ -17,6 +17,12 @@ on:
 permissions:
   contents: write
 
+# Cancel any in-progress run for the same branch so concurrent scheduled
+# runs don't race to push seen.json and cause rebase/conflict loops.
+concurrency:
+  group: notify-bot
+  cancel-in-progress: false   # let the running job finish; skip the queued one
+
 jobs:
   check-notifications:
     runs-on: ubuntu-latest

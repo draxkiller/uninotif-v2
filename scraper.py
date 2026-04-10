@@ -18,6 +18,11 @@ from bs4 import BeautifulSoup
 # CONFIG  (all values come from GitHub Secrets)
 # ─────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
+if not re.match(r'^\d+:[\w-]{35,}$', TELEGRAM_TOKEN):
+    raise ValueError(
+        "TELEGRAM_BOT_TOKEN looks invalid — expected format: <bot_id>:<35+ char token>. "
+        "Check your GitHub secret."
+    )
 # Comma-separated chat IDs  e.g.  "123456789,-1001234567890"
 # First ID = admin (receives error alerts too)
 _raw_ids         = os.environ.get("TELEGRAM_CHAT_IDS", os.environ.get("TELEGRAM_CHAT_ID", ""))
@@ -397,30 +402,38 @@ def build_caption(n: dict) -> str:
 # ─────────────────────────────────────────────────────────────
 def deliver(n: dict):
     caption  = build_caption(n)
-    pdf_url  = get_pdf_url(n["link"])
+    link     = n["link"]
     pdf_path = None
 
-    if pdf_url:
-        print(f"    PDF found → {pdf_url[:80]}")
-        pdf_path = download_pdf(pdf_url)
-        if not pdf_path:
-            print("    PDF download failed — sending text message with link instead")
-
-    if pdf_path:
-        print(f"    Sending PDF file to {len(CHAT_IDS)} chat(s)...")
-        broadcast_document_file(pdf_path, caption)
+    # If the notification link is itself a PDF, use it directly — no page fetch needed.
+    if re.search(r'\.pdf(\?|$)', link, re.I):
+        pdf_url = link
+        print(f"    Direct PDF link detected — skipping page fetch")
     else:
-        # No PDF file — send text. If we found a URL but couldn't download it,
-        # append it to the caption so the user can tap to open the PDF manually.
-        # (We do NOT use tg_document_url because Telegram's servers cannot fetch
-        #  PDFs from the university's server — it requires browser-like headers.)
-        if pdf_url:
-            caption += f'\n📎 <a href="{pdf_url}">Download PDF ↗</a>'
-        print(f"    Sending text message to {len(CHAT_IDS)} chat(s)...")
-        broadcast_text(caption)
+        pdf_url = get_pdf_url(link)
 
-    if pdf_path:
-        Path(pdf_path).unlink(missing_ok=True)
+    try:
+        if pdf_url:
+            print(f"    PDF found → {pdf_url[:80]}")
+            pdf_path = download_pdf(pdf_url)
+            if not pdf_path:
+                print("    PDF download failed — sending text message with link instead")
+
+        if pdf_path:
+            print(f"    Sending PDF file to {len(CHAT_IDS)} chat(s)...")
+            broadcast_document_file(pdf_path, caption)
+        else:
+            # No PDF file — send text. If we found a URL but couldn't download it,
+            # append it to the caption so the user can tap to open the PDF manually.
+            # (We do NOT use tg_document_url because Telegram's servers cannot fetch
+            #  PDFs from the university's server — it requires browser-like headers.)
+            if pdf_url:
+                caption += f'\n📎 <a href="{pdf_url}">Download PDF ↗</a>'
+            print(f"    Sending text message to {len(CHAT_IDS)} chat(s)...")
+            broadcast_text(caption)
+    finally:
+        if pdf_path:
+            Path(pdf_path).unlink(missing_ok=True)
 
 # ─────────────────────────────────────────────────────────────
 # DAILY HEARTBEAT
@@ -429,8 +442,9 @@ def maybe_send_heartbeat(seen: dict):
     """Send a daily 'bot is alive' message to admin at ~8 AM IST."""
     now = datetime.now(timezone.utc)
     # IST = UTC+5:30 → 8:00 IST = 2:30 UTC
-    # We only run every 5 min, so trigger between 2:30–2:35 UTC
-    if not (now.hour == 2 and 30 <= now.minute < 35):
+    # GitHub Actions can delay scheduled runs by up to 30 min on busy days, so
+    # accept any 5-min slot between 2:30 UTC and 3:00 UTC (8:00–8:30 IST).
+    if not ((now.hour == 2 and now.minute >= 30) or (now.hour == 3 and now.minute < 5)):
         return
 
     hb    = load_json(HEARTBEAT_FILE)
@@ -499,8 +513,10 @@ def main():
         return
 
     seen         = load_json(SEEN_FILE)
-    seen         = prune_seen(seen)
+    # Determine first-run status BEFORE pruning: if the file already had entries
+    # but all of them expired, we should NOT re-seed and silence new notifications.
     is_first_run = len(seen) == 0
+    seen         = prune_seen(seen)
 
     notifications = []
     try:
