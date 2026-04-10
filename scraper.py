@@ -9,9 +9,9 @@ Pondicherry University — Telegram Notification Bot  v2
 ✦ 5-minute checks via GitHub Actions
 """
 
-import os, re, json, time, hashlib, requests, io
+import os, re, json, time, hashlib, requests
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────────────────────
@@ -86,9 +86,9 @@ def _fmt_wp_date(date_str: str) -> str:
         return date_str
 
 
-def fetch_all_notifications() -> list[dict]:
-    results = _try_wp_rest_api()
-    if results:
+def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
+    results = _try_wp_rest_api(seen_ids)
+    if results is not None:
         print(f"  [API]  {len(results)} notifications via WP REST API")
         return results
     results = _scrape_html()
@@ -96,8 +96,10 @@ def fetch_all_notifications() -> list[dict]:
     return results
 
 
-def _try_wp_rest_api() -> list[dict]:
+def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
+    """Return a list of notifications from the WP REST API, or None if unavailable."""
     all_items = []
+    api_failed = False
     for page in range(1, 6):
         url = (
             f"{BASE_URL}/wp-json/wp/v2/university_news"
@@ -109,7 +111,8 @@ def _try_wp_rest_api() -> list[dict]:
                 break
             if r.status_code != 200:
                 print(f"  WP API returned HTTP {r.status_code} — falling back to HTML scrape")
-                return []
+                api_failed = True
+                break
             items = r.json()
             if not items:
                 break
@@ -125,6 +128,7 @@ def _try_wp_rest_api() -> list[dict]:
                                 break
                         else:
                             cat_name = raw
+                            print(f"  [API] Unrecognized category: {raw!r}")
                 except Exception:
                     pass
                 all_items.append({
@@ -135,10 +139,15 @@ def _try_wp_rest_api() -> list[dict]:
                     "issued_by": "",
                     "date":      _fmt_wp_date(item.get("date", "")),
                 })
+            # If every item on this page is already known, older pages will be too
+            if seen_ids and all(str(item["id"]) in seen_ids for item in items):
+                break
         except Exception as e:
             print(f"  WP API page {page} error: {e}")
+            if not all_items:
+                api_failed = True
             break
-    return all_items
+    return None if api_failed else all_items
 
 
 def _scrape_html() -> list[dict]:
@@ -286,11 +295,13 @@ def download_pdf(pdf_url: str) -> str | None:
                     size += len(chunk)
                     if size > 49 * 1024 * 1024:
                         print("    PDF too large (>49 MB) — skipping")
+                        Path(local).unlink(missing_ok=True)
                         return None
 
             # Validate actual PDF magic bytes — don't trust Content-Type
             if not first_chunk or not first_chunk.startswith(b"%PDF"):
                 print(f"    Not a valid PDF (bad magic bytes) — skipping")
+                Path(local).unlink(missing_ok=True)
                 return None
 
         file_size = Path(local).stat().st_size
@@ -319,7 +330,8 @@ def _tg_post(endpoint: str, chat_id: str, **kwargs) -> bool:
             err = r.json().get("description", r.text)
             print(f"    TG {endpoint} attempt {attempt+1} failed ({chat_id}): {err}")
             if "Too Many Requests" in err:
-                wait = int(re.search(r"\d+", err).group() or 5) + 1
+                m = re.search(r"\d+", err)
+                wait = (int(m.group()) if m else 5) + 1
                 time.sleep(wait)
             elif "file" in err.lower() or "document" in err.lower():
                 return False
@@ -415,7 +427,7 @@ def deliver(n: dict):
 # ─────────────────────────────────────────────────────────────
 def maybe_send_heartbeat(seen: dict):
     """Send a daily 'bot is alive' message to admin at ~8 AM IST."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     # IST = UTC+5:30 → 8:00 IST = 2:30 UTC
     # We only run every 5 min, so trigger between 2:30–2:35 UTC
     if not (now.hour == 2 and 30 <= now.minute < 35):
@@ -441,6 +453,38 @@ def maybe_send_heartbeat(seen: dict):
     save_json(HEARTBEAT_FILE, hb)
 
 # ─────────────────────────────────────────────────────────────
+# SEEN.JSON PRUNING
+# ─────────────────────────────────────────────────────────────
+PRUNE_DAYS = 180
+
+def prune_seen(seen: dict) -> dict:
+    """Remove notified entries older than PRUNE_DAYS to keep seen.json compact.
+    'seeded' entries (initial baseline) are never pruned.
+    """
+    cutoff  = datetime.now(timezone.utc) - timedelta(days=PRUNE_DAYS)
+    pruned  = {}
+    removed = 0
+    for nid, meta in seen.items():
+        notified = meta.get("notified", "")
+        if notified == "seeded":
+            pruned[nid] = meta
+            continue
+        try:
+            ts = datetime.fromisoformat(notified)
+            # Treat naive timestamps (stored before timezone support) as UTC
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                pruned[nid] = meta
+            else:
+                removed += 1
+        except Exception:
+            pruned[nid] = meta  # keep entries we can't parse
+    if removed:
+        print(f"  🗑  Pruned {removed} old entries from seen.json (>{PRUNE_DAYS} days)")
+    return pruned
+
+# ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
 def main():
@@ -455,11 +499,12 @@ def main():
         return
 
     seen         = load_json(SEEN_FILE)
+    seen         = prune_seen(seen)
     is_first_run = len(seen) == 0
 
     notifications = []
     try:
-        notifications = fetch_all_notifications()
+        notifications = fetch_all_notifications(seen_ids=set(seen.keys()))
     except Exception as e:
         err_msg = f"Failed to fetch notifications: {e}"
         print(f"  ERROR: {err_msg}")
@@ -503,7 +548,7 @@ def main():
             "title":    n["title"],
             "date":     n.get("date", ""),
             "category": n.get("category", ""),
-            "notified": datetime.now().isoformat(),
+            "notified": datetime.now(timezone.utc).isoformat(),
         }
         save_json(SEEN_FILE, seen)   # persist immediately
 
