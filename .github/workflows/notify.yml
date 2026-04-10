@@ -32,7 +32,7 @@ jobs:
       # ── 2. Optional re-seed ───────────────────────────────────
       - name: 🔄 Clear seen.json (if force_reseed)
         if: ${{ github.event.inputs.force_reseed == 'true' }}
-        run: echo "{}" > seen.json && echo "{}" > heartbeat.json
+        run: echo "{}" > seen.json
 
       # ── 3. Python ────────────────────────────────────────────
       - name: 🐍 Set up Python 3.11
@@ -90,5 +90,11 @@ jobs:
             echo "No changes — skipping commit."
           else
             git commit -m "chore: update state [skip ci]"
-            git push origin HEAD:main
+            for i in 1 2 3 4; do
+              git push origin HEAD:main && break || {
+                echo "Push attempt $i failed — rebasing and retrying..."
+                git pull --rebase origin main
+                sleep 5
+              }
+            done
           fi
