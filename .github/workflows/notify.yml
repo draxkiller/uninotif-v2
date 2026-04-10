@@ -1,0 +1,94 @@
+name: 🔔 PU Notification Bot v2
+
+on:
+  schedule:
+    # Every 5 minutes (GitHub Actions minimum)
+    - cron: '*/5 * * * *'
+
+  # Manual trigger with optional reset
+  workflow_dispatch:
+    inputs:
+      force_reseed:
+        description: 'Clear seen.json and re-seed (no alerts sent)'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check-notifications:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Optional re-seed ───────────────────────────────────
+      - name: 🔄 Clear seen.json (if force_reseed)
+        if: ${{ github.event.inputs.force_reseed == 'true' }}
+        run: echo "{}" > seen.json && echo "{}" > heartbeat.json
+
+      # ── 3. Python ────────────────────────────────────────────
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Run scraper ───────────────────────────────────────
+      - name: 🤖 Check notifications
+        id: scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
+        run: python scraper.py
+
+      # ── 5. Alert on failure ───────────────────────────────────
+      - name: 🚨 Alert admin if scraper failed
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
+        run: |
+          python - <<'EOF'
+          import os, requests
+          token   = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_IDS"].split(",")[0].strip()
+          run_url = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+              "chat_id":    chat_id,
+              "parse_mode": "HTML",
+              "text": (
+                "🔴 <b>Bot run failed!</b>\n\n"
+                "The notification checker encountered an error.\n"
+                f'<a href="{run_url}">View GitHub Actions log ↗</a>'
+              ),
+            },
+            timeout=15,
+          )
+          print("Admin alerted.")
+          EOF
+
+      # ── 6. Commit seen.json + heartbeat.json ─────────────────
+      - name: 💾 Commit state files
+        run: |
+          git config user.name  "pu-notif-bot[bot]"
+          git config user.email "pu-notif-bot@users.noreply.github.com"
+          git add seen.json heartbeat.json
+          if git diff --cached --quiet; then
+            echo "No changes — skipping commit."
+          else
+            git commit -m "chore: update state [skip ci]"
+            git push origin HEAD:main
+          fi
