@@ -64,8 +64,30 @@ def save_json(path: str, data: dict):
     Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 # ─────────────────────────────────────────────────────────────
-# SCRAPERS
+# HELPERS
 # ─────────────────────────────────────────────────────────────
+def _abs(href: str) -> str:
+    """Convert a relative URL to absolute using BASE_URL."""
+    href = href.strip()
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return BASE_URL + href
+    return BASE_URL + "/" + href
+
+
+def _fmt_wp_date(date_str: str) -> str:
+    """Format a WP REST API date string (2024-01-15T10:30:00) to readable form."""
+    try:
+        dt = datetime.strptime(date_str[:19], "%Y-%m-%dT%H:%M:%S")
+        return dt.strftime("%d %b %Y")
+    except Exception:
+        return date_str
+
+
+
 def fetch_all_notifications() -> list[dict]:
     results = _try_wp_rest_api()
     if results:
