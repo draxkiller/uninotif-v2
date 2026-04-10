@@ -12,6 +12,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 - **Admin-only error alerts** — failures go to the first chat ID only
 - **Daily heartbeat** — 8:00 AM IST status message so you know the bot is alive
 - **Smart deduplication** — `seen.json` committed to repo after every run; re-sends are prevented even if the job crashes mid-run
+- **Auto-pruning** — entries older than 180 days are removed from `seen.json` automatically to keep the file compact; seeded (baseline) entries are never pruned
 - **Runs free** — GitHub Actions scheduled workflow, no server needed
 
 ---
@@ -77,13 +78,13 @@ On first run the bot will:
 
 ## 🕐 Schedule
 
-The workflow runs at **:03, :18, :33, :48** of every hour (every 15 minutes, offset to avoid GitHub Actions queue collisions if running alongside another bot).
+The workflow runs **every 5 minutes** (`*/5 * * * *`) — the minimum interval supported by GitHub Actions.
 
 To change the interval, edit `notify.yml`:
 
 ```yaml
-- cron: '3,18,33,48 * * * *'   # every 15 min
-# - cron: '*/5 * * * *'        # every 5 min (GitHub minimum, may be delayed)
+- cron: '*/5 * * * *'          # every 5 min (GitHub Actions minimum)
+# - cron: '3,18,33,48 * * * *' # every 15 min (lower resource usage)
 ```
 
 > **Note:** GitHub Actions free tier does not guarantee exact timing. Scheduled runs can be delayed 5–30 minutes during peak hours.
@@ -142,6 +143,7 @@ python scraper.py
 - The bot uses the **WordPress REST API** (`/wp-json/wp/v2/university_news`) as its primary source, falling back to HTML scraping if the API is unavailable.
 - PDFs over 49 MB are skipped (Telegram's file size limit is 50 MB).
 - The bot sends at most one Telegram message per notification per run; if PDF download fails, it falls back to sending a text message with the notification link.
+- `seen.json` entries older than 180 days are pruned automatically on each run; entries from the initial seeding baseline are never pruned.
 
 ---
 
