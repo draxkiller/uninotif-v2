@@ -88,6 +88,7 @@ def _try_wp_rest_api() -> list[dict]:
             if r.status_code == 400:
                 break
             if r.status_code != 200:
+                print(f"  WP API returned HTTP {r.status_code} — falling back to HTML scrape")
                 return []
             items = r.json()
             if not items:
@@ -140,7 +141,27 @@ def _scrape_html() -> list[dict]:
             _extract_rows(container, f"{cat_name} {cat_emoji}", results)
 
     if not results:
+        # Last-resort: scan every <tr> on the page
         _extract_rows(soup, "General 🔔", results)
+
+    if not results:
+        # Even more aggressive: grab every <a> that looks like a notification link
+        print("  [HTML] No table rows found — trying link scan fallback")
+        seen_links_fb: set = set()
+        for a in soup.find_all("a", href=True):
+            href = _abs(a["href"])
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+            if href in seen_links_fb:
+                continue
+            if any(skip in href for skip in ["#", "javascript", "mailto", "facebook", "twitter"]):
+                continue
+            seen_links_fb.add(href)
+            results.append({
+                "id": href, "title": title, "link": href,
+                "category": "General 🔔", "issued_by": "", "date": "",
+            })
 
     seen_links, deduped = set(), []
     for n in results:
@@ -385,7 +406,17 @@ def main():
     is_first_run = len(seen) == 0
 
     if is_first_run:
-        print("  ⚡ First run — seeding seen.json without sending alerts.")
+        if len(notifications) == 0:
+            # Scraping returned nothing — something is broken, don't silently seed 0
+            err_msg = (
+                "First run completed but scraped 0 notifications.\n"
+                "The WP REST API and HTML scraper both returned empty results.\n"
+                "Check the site URL and scraper selectors."
+            )
+            print(f"\n  ❌ {err_msg}")
+            alert_admin(err_msg)
+            return  # Don't save seen.json or broadcast — let it retry next run
+        print(f"  ⚡ First run — seeding seen.json without sending alerts.")
 
     try:
         notifications = fetch_all_notifications()
