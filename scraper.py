@@ -363,17 +363,24 @@ def tg_document_file(chat_id: str, path: str, caption: str) -> bool:
         )
 
 
-def broadcast_text(text: str):
-    """Send text to ALL configured chat IDs."""
+def broadcast_text(text: str) -> bool:
+    """Send text to ALL configured chat IDs. Returns True if at least one succeeded."""
+    any_ok = False
     for cid in CHAT_IDS:
-        tg_text(cid, text)
+        if tg_text(cid, text):
+            any_ok = True
         time.sleep(0.5)
+    return any_ok
 
 
-def broadcast_document_file(path: str, caption: str):
+def broadcast_document_file(path: str, caption: str) -> bool:
+    """Send document to ALL configured chat IDs. Returns True if at least one succeeded."""
+    any_ok = False
     for cid in CHAT_IDS:
-        tg_document_file(cid, path, caption)
+        if tg_document_file(cid, path, caption):
+            any_ok = True
         time.sleep(0.5)
+    return any_ok
 
 
 def alert_admin(text: str):
@@ -400,10 +407,12 @@ def build_caption(n: dict) -> str:
 # ─────────────────────────────────────────────────────────────
 # DELIVER ONE NOTIFICATION
 # ─────────────────────────────────────────────────────────────
-def deliver(n: dict):
+def deliver(n: dict) -> bool:
+    """Deliver a notification. Returns True if at least one message was sent successfully."""
     caption  = build_caption(n)
     link     = n["link"]
     pdf_path = None
+    ok       = False
 
     # If the notification link is itself a PDF, use it directly — no page fetch needed.
     if re.search(r'\.pdf(\?|$)', link, re.I):
@@ -421,7 +430,7 @@ def deliver(n: dict):
 
         if pdf_path:
             print(f"    Sending PDF file to {len(CHAT_IDS)} chat(s)...")
-            broadcast_document_file(pdf_path, caption)
+            ok = broadcast_document_file(pdf_path, caption)
         else:
             # No PDF file — send text. If we found a URL but couldn't download it,
             # append it to the caption so the user can tap to open the PDF manually.
@@ -430,10 +439,12 @@ def deliver(n: dict):
             if pdf_url:
                 caption += f'\n📎 <a href="{pdf_url}">Download PDF ↗</a>'
             print(f"    Sending text message to {len(CHAT_IDS)} chat(s)...")
-            broadcast_text(caption)
+            ok = broadcast_text(caption)
     finally:
         if pdf_path:
             Path(pdf_path).unlink(missing_ok=True)
+
+    return ok
 
 # ─────────────────────────────────────────────────────────────
 # DAILY HEARTBEAT
@@ -569,8 +580,21 @@ def main():
         save_json(SEEN_FILE, seen)   # persist immediately
 
         try:
-            deliver(n)
-            new_count += 1
+            delivered = deliver(n)
+            if delivered:
+                new_count += 1
+            else:
+                print(f"    ⚠️  All Telegram sends failed — will retry on next run")
+                errors += 1
+                # Remove from seen so the next run re-attempts delivery
+                del seen[nid]
+                save_json(SEEN_FILE, seen)
+                alert_admin(
+                    f"Failed to deliver notification to ALL configured chats.\n"
+                    f"It will be retried on the next run.\n\n"
+                    f"<b>{n['title']}</b>\n"
+                    f"Check that TELEGRAM_CHAT_IDS are valid user/group IDs."
+                )
         except Exception as e:
             print(f"    ERROR delivering: {e}")
             errors += 1
