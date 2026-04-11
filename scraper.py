@@ -570,35 +570,37 @@ def main():
         print(f"\n  🆕 {n['title'][:70]}")
         print(f"     {n.get('category','')}  |  {n.get('date','')}")
 
-        # Mark as seen BEFORE delivering — prevents re-sends if job times out mid-run
-        seen[nid] = {
-            "title":    n["title"],
-            "date":     n.get("date", ""),
-            "category": n.get("category", ""),
-            "notified": datetime.now(timezone.utc).isoformat(),
-        }
-        save_json(SEEN_FILE, seen)   # persist immediately
-
         try:
             delivered = deliver(n)
             if delivered:
+                # Mark as seen only after confirmed delivery to allow retry on failure
+                seen[nid] = {
+                    "title":    n["title"],
+                    "date":     n.get("date", ""),
+                    "category": n.get("category", ""),
+                    "notified": datetime.now(timezone.utc).isoformat(),
+                }
+                save_json(SEEN_FILE, seen)   # persist immediately
                 new_count += 1
             else:
                 print(f"    ⚠️  All Telegram sends failed — will retry on next run")
                 errors += 1
-                # Remove from seen so the next run re-attempts delivery
-                del seen[nid]
-                save_json(SEEN_FILE, seen)
-                alert_admin(
-                    f"Failed to deliver notification to ALL configured chats.\n"
-                    f"It will be retried on the next run.\n\n"
-                    f"<b>{n['title']}</b>\n"
-                    f"Check that TELEGRAM_CHAT_IDS are valid user/group IDs."
-                )
+                try:
+                    alert_admin(
+                        f"Failed to deliver notification to ALL configured chats.\n"
+                        f"It will be retried on the next run.\n\n"
+                        f"<b>{n['title']}</b>\n"
+                        f"Check that TELEGRAM_CHAT_IDS are valid user/group IDs."
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             print(f"    ERROR delivering: {e}")
             errors += 1
-            alert_admin(f"Error delivering notification:\n<b>{n['title']}</b>\n\n{e}")
+            try:
+                alert_admin(f"Error delivering notification:\n<b>{n['title']}</b>\n\n{e}")
+            except Exception:
+                pass
 
         time.sleep(3)
 
