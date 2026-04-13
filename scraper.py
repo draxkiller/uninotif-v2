@@ -254,7 +254,7 @@ def _pdf_from_html(html: str) -> str | None:
         m = re.search(pat, html, re.I)
         if m:
             c = m.group(1)
-            if len(c) > 8:
+            if len(c) > 8:  # sanity-check: skip trivially short matches (e.g. ".pdf" alone)
                 return _abs(c)
     return None
 
@@ -453,7 +453,7 @@ def deliver(n: dict):
 # ─────────────────────────────────────────────────────────────
 # DAILY HEARTBEAT
 # ─────────────────────────────────────────────────────────────
-HEARTBEAT_INTERVAL_HOURS = 20   # send once per day; allow some clock drift
+HEARTBEAT_INTERVAL_HOURS = 20   # send approximately once per day (20-hour minimum interval to handle scheduling variations)
 
 def maybe_send_heartbeat(seen: dict):
     """Send a daily 'bot is alive' message to admin.
