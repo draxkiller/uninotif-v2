@@ -7,6 +7,7 @@ Pondicherry University — Telegram Notification Bot  v2
 ✦ Error alerts to admin only
 ✦ Daily heartbeat
 ✦ 5-minute checks via GitHub Actions
+✦ AI summary via Google Gemini Flash (optional)
 """
 
 import os, re, json, time, hashlib, requests
@@ -54,6 +55,24 @@ TAB_SLUGS = {
 }
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+# ─────────────────────────────────────────────────────────────
+# AI SUMMARY CONFIG  (optional — set GEMINI_API_KEY secret)
+# ─────────────────────────────────────────────────────────────
+GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
+# Set ENABLE_AI_SUMMARY=false to disable summaries without removing the key
+ENABLE_AI_SUMMARY  = os.environ.get("ENABLE_AI_SUMMARY", "true").lower() not in ("false", "0", "no")
+AI_SUMMARY_ENABLED = bool(GEMINI_API_KEY) and ENABLE_AI_SUMMARY
+
+_gemini_model = None   # lazily initialised
+
+def _get_gemini_model():
+    global _gemini_model
+    if _gemini_model is None:
+        import google.generativeai as genai  # noqa: PLC0415
+        genai.configure(api_key=GEMINI_API_KEY)
+        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    return _gemini_model
 
 # ─────────────────────────────────────────────────────────────
 # SEEN / HEARTBEAT STORE
@@ -146,6 +165,8 @@ def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
                     "issued_by": "",
                     "date":      _fmt_wp_date(item.get("date", "")),
                 }
+                if content_html:
+                    entry["body_html"] = content_html
                 if pdf_urls:
                     entry["pdf_urls"] = pdf_urls
                 all_items.append(entry)
@@ -361,8 +382,60 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────
-# TELEGRAM
+# AI SUMMARY
 # ─────────────────────────────────────────────────────────────
+_AI_MAX_CHARS = 3000   # truncation limit fed to the model
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract plain text from a downloaded PDF using pdfplumber.
+
+    Returns an empty string if extraction fails or pdfplumber is unavailable.
+    Only the first 5 pages are read to keep latency low.
+    """
+    try:
+        import pdfplumber  # noqa: PLC0415
+        text_parts: list[str] = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages[:5]:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+        return "\n".join(text_parts).strip()
+    except Exception as e:
+        print(f"    PDF text extraction error: {e}")
+        return ""
+
+
+def get_ai_summary(text: str) -> str:
+    """Return a 2–3 sentence AI summary of a notification's text content.
+
+    Returns an empty string on any error so the caller can fall back gracefully.
+    """
+    if not AI_SUMMARY_ENABLED:
+        return ""
+    text = text.strip()
+    if not text or len(text) < 30:
+        return ""
+    try:
+        truncated = text[:_AI_MAX_CHARS]
+        model  = _get_gemini_model()
+        prompt = (
+            "You are a helpful assistant for university students. "
+            "Summarize the following university notification in 2-3 concise sentences. "
+            "Focus on the key information (what, who, when, where). "
+            "Reply with the summary only, no preamble.\n\n"
+            f"{truncated}"
+        )
+        response = model.generate_content(prompt)
+        summary  = response.text.strip()
+        print(f"    AI summary generated ({len(summary)} chars)")
+        return summary
+    except Exception as e:
+        print(f"    AI summary error (skipping): {e}")
+        return ""
+
+
+
 def _tg_post(endpoint: str, chat_id: str, **kwargs) -> bool:
     """Post to Telegram with retry + rate-limit handling."""
     for attempt in range(3):
@@ -422,7 +495,8 @@ def alert_admin(text: str):
 # ─────────────────────────────────────────────────────────────
 # MESSAGE FORMATTING
 # ─────────────────────────────────────────────────────────────
-def build_caption(n: dict) -> str:
+def build_caption(n: dict, summary: str = "") -> str:
+    summary_block = f"\n🤖 <b>AI Summary:</b>\n{summary}\n" if summary else ""
     return (
         f"🔔 <b>NEW NOTIFICATION</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -430,7 +504,8 @@ def build_caption(n: dict) -> str:
         f"📁 <b>Category :</b> {n.get('category', 'General')}\n"
         f"📄 <b>Title    :</b> {n['title']}\n"
         f"🏢 <b>Issued by:</b> {n.get('issued_by') or '—'}\n"
-        f"📅 <b>Date     :</b> {n.get('date') or '—'}\n\n"
+        f"📅 <b>Date     :</b> {n.get('date') or '—'}\n"
+        f"{summary_block}\n"
         f"🔗 <a href=\"{n['link']}\">Open on Website ↗</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
@@ -439,7 +514,6 @@ def build_caption(n: dict) -> str:
 # DELIVER ONE NOTIFICATION
 # ─────────────────────────────────────────────────────────────
 def deliver(n: dict):
-    caption = build_caption(n)
     link    = n["link"]
 
     # Collect all PDF URLs for this notification.
@@ -468,6 +542,23 @@ def deliver(n: dict):
             else:
                 print("    PDF download failed — will include link in message")
                 failed_urls.append(pdf_url)
+
+        # ── AI summary ──────────────────────────────────────────
+        # Priority: PDF text (richest) → API body HTML → skip
+        summary = ""
+        if AI_SUMMARY_ENABLED:
+            raw_text = ""
+            if pdf_paths:
+                raw_text = extract_text_from_pdf(pdf_paths[0])
+            if not raw_text:
+                # Fall back to body HTML from WP REST API if available
+                body_html = n.get("body_html", "")
+                if body_html:
+                    raw_text = BeautifulSoup(body_html, "html.parser").get_text(separator=" ", strip=True)
+            if raw_text:
+                summary = get_ai_summary(raw_text)
+
+        caption = build_caption(n, summary)
 
         if pdf_paths:
             total = len(pdf_paths)
