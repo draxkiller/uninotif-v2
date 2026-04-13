@@ -435,7 +435,6 @@ def get_ai_summary(text: str) -> str:
         return ""
 
 
-
 def _tg_post(endpoint: str, chat_id: str, **kwargs) -> bool:
     """Post to Telegram with retry + rate-limit handling."""
     for attempt in range(3):
@@ -504,7 +503,7 @@ def build_caption(n: dict, summary: str = "") -> str:
         f"📁 <b>Category :</b> {n.get('category', 'General')}\n"
         f"📄 <b>Title    :</b> {n['title']}\n"
         f"🏢 <b>Issued by:</b> {n.get('issued_by') or '—'}\n"
-        f"📅 <b>Date     :</b> {n.get('date') or '—'}\n"
+        f"📅 <b>Date     :</b> {n.get('date') or '—'}"
         f"{summary_block}\n"
         f"🔗 <a href=\"{n['link']}\">Open on Website ↗</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
