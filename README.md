@@ -10,7 +10,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 - **PDF delivery** — attaches the notification's PDF directly to the Telegram message
 - **Multi-recipient** — broadcast to personal chat + group chats simultaneously
 - **Admin-only error alerts** — failures go to the first chat ID only
-- **Daily heartbeat** — 8:00 AM IST status message so you know the bot is alive
+- **Daily heartbeat** — fires approximately once per day (first run after 20+ hours since the last heartbeat) so you know the bot is alive
 - **Smart deduplication** — `seen.json` committed to repo after every run; re-sends are prevented even if the job crashes mid-run
 - **Auto-pruning** — entries older than 180 days are removed from `seen.json` automatically to keep the file compact; seeded (baseline) entries are never pruned
 - **Runs free** — GitHub Actions scheduled workflow, no server needed
@@ -26,7 +26,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 ├── requirements.txt                  # Python dependencies
 └── .github/
     └── workflows/
-        └── notify.yml                # GitHub Actions workflow (runs every 15 min)
+        └── notify.yml                # GitHub Actions workflow (runs every 5 min)
 ```
 
 ---
