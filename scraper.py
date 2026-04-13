@@ -288,6 +288,65 @@ def _pdfs_from_html(html: str) -> list[str]:
     return found
 
 
+def choose_primary_pdf_url(urls: list[str], title: str = "") -> str | None:
+    """Choose the single most likely *primary* PDF from a list of candidate URLs.
+
+    Scoring is deterministic:
+    - Boost: URL contains circular/notice/notification keywords.
+    - Boost: direct ``.pdf`` link, university domain, WP uploads path.
+    - Penalty: common secondary-attachment patterns (annex, form, brochure, etc.).
+    - Tiny bonus: URL filename shares long words with the post title.
+    - Tie-break: original list order (first URL wins).
+    """
+    if not urls:
+        return None
+    if len(urls) == 1:
+        return urls[0]
+
+    _BOOST_TERMS = ("circular", "notification", "notice", "order", "corrigendum")
+    _PENALTY_TERMS = (
+        "annex", "appendix", "attachment", "form", "application",
+        "brochure", "prospectus", "timetable", "schedule",
+        "guidelines", "instruction", "logo", "favicon",
+    )
+
+    # Pre-compute title words once; reused inside _score() for each URL
+    title_words = [w for w in re.findall(r"[a-z0-9]+", title.lower()) if len(w) >= 6]
+
+    def _score(url: str) -> int:
+        s = 0
+        lu = url.lower()
+
+        # Strongly prefer actual .pdf links
+        if re.search(r"\.pdf(\?|$)", url, re.I):
+            s += 50
+
+        # Prefer university-hosted uploads
+        if "pondiuni.edu.in" in lu:
+            s += 10
+        if "/wp-content/uploads/" in lu:
+            s += 10
+
+        # Boost "main document" keywords (award only once)
+        if any(k in lu for k in _BOOST_TERMS):
+            s += 25
+
+        # Penalise secondary attachment patterns
+        for k in _PENALTY_TERMS:
+            if k in lu:
+                s -= 25
+
+        # Tiny bonus when filename shares long words with the post title
+        for w in title_words:
+            if w in lu:
+                s += 2
+
+        return s
+
+    # max() returns the first maximum element on ties, preserving list order
+    return max(urls, key=_score)
+
+
 def get_pdf_urls(detail_url: str) -> list[str]:
     try:
         r = requests.get(detail_url, headers=HEADERS, timeout=30)
@@ -361,9 +420,11 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
                 # Try to extract a direct PDF link from the page and retry once.
                 if _retry and chunks:
                     html_content = b"".join(chunks).decode("utf-8", errors="replace")
-                    direct_url = next(iter(_pdfs_from_html(html_content)), None)
+                    candidates   = _pdfs_from_html(html_content)
+                    print(f"    Viewer page: {len(candidates)} PDF candidate(s) found")
+                    direct_url   = choose_primary_pdf_url(candidates)
                     if direct_url and direct_url != pdf_url:
-                        print(f"    Viewer page detected — retrying with direct URL → {direct_url[:80]}")
+                        print(f"    Viewer page detected — retrying with primary PDF → {direct_url[:80]}")
                         return download_pdf(direct_url, _retry=False)
                 print(f"    Not a valid PDF (bad magic bytes) — skipping")
                 return None
@@ -539,12 +600,16 @@ def build_caption(n: dict, summary: str = "") -> str:
 def deliver(n: dict):
     link    = n["link"]
 
-    # Collect all PDF URLs for this notification.
+    # Collect PDF URL(s) for this notification, then select the single primary one.
     # Prefer PDF URLs extracted from API content (no extra HTTP request).
     # Fall back to direct-link detection, then full page fetch.
     if "pdf_urls" in n:
-        pdf_urls = n["pdf_urls"]
-        print(f"    {len(pdf_urls)} PDF URL(s) from API content")
+        candidates = n["pdf_urls"]
+        print(f"    {len(candidates)} PDF candidate(s) from API content")
+        primary = choose_primary_pdf_url(candidates, title=n.get("title", ""))
+        if primary:
+            print(f"    Selected primary PDF → {primary[:80]}")
+        pdf_urls = [primary] if primary else []
     elif "pdf_url" in n:
         pdf_urls = [n["pdf_url"]]
         print(f"    PDF URL from API content")
@@ -552,7 +617,12 @@ def deliver(n: dict):
         pdf_urls = [link]
         print(f"    Direct PDF link detected — skipping page fetch")
     else:
-        pdf_urls = get_pdf_urls(link)
+        candidates = get_pdf_urls(link)
+        print(f"    {len(candidates)} PDF candidate(s) found on page")
+        primary = choose_primary_pdf_url(candidates, title=n.get("title", ""))
+        if primary:
+            print(f"    Selected primary PDF → {primary[:80]}")
+        pdf_urls = [primary] if primary else []
 
     pdf_paths: list[str] = []
     failed_urls: list[str] = []
@@ -785,3 +855,92 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ─────────────────────────────────────────────────────────────
+# TESTS  (run with: python scraper.py --test)
+# ─────────────────────────────────────────────────────────────
+def _run_tests():
+    """Minimal self-contained tests for choose_primary_pdf_url()."""
+    import sys
+
+    passed = 0
+    failed = 0
+
+    def _check(name: str, got, expected):
+        nonlocal passed, failed
+        if got == expected:
+            print(f"  ✅  {name}")
+            passed += 1
+        else:
+            print(f"  ❌  {name}")
+            print(f"      expected: {expected}")
+            print(f"      got:      {got}")
+            failed += 1
+
+    # 1. Returns None for empty input
+    _check("empty list → None", choose_primary_pdf_url([]), None)
+
+    # 2. Single URL is returned as-is
+    _check(
+        "single URL returned as-is",
+        choose_primary_pdf_url(["https://example.com/doc.pdf"]),
+        "https://example.com/doc.pdf",
+    )
+
+    # 3. Circular beats annexure
+    _check(
+        "circular beats annexure",
+        choose_primary_pdf_url([
+            "https://www.pondiuni.edu.in/wp-content/uploads/2025/04/Annexure-form.pdf",
+            "https://www.pondiuni.edu.in/wp-content/uploads/2025/04/Circular-Hostel.pdf",
+        ]),
+        "https://www.pondiuni.edu.in/wp-content/uploads/2025/04/Circular-Hostel.pdf",
+    )
+
+    # 4. Direct .pdf beats non-.pdf URL
+    _check(
+        "direct .pdf beats viewer URL",
+        choose_primary_pdf_url([
+            "https://www.pondiuni.edu.in/viewer?file=notice.pdf",
+            "https://www.pondiuni.edu.in/wp-content/uploads/notice.pdf",
+        ]),
+        "https://www.pondiuni.edu.in/wp-content/uploads/notice.pdf",
+    )
+
+    # 5. University domain preferred over external
+    _check(
+        "university domain preferred",
+        choose_primary_pdf_url([
+            "https://external-cdn.example.com/doc.pdf",
+            "https://www.pondiuni.edu.in/wp-content/uploads/doc.pdf",
+        ]),
+        "https://www.pondiuni.edu.in/wp-content/uploads/doc.pdf",
+    )
+
+    # 6. Title-word bonus helps pick correct PDF
+    _check(
+        "title word bonus picks matching PDF",
+        choose_primary_pdf_url(
+            [
+                "https://www.pondiuni.edu.in/wp-content/uploads/2025/04/Prospectus-2025.pdf",
+                "https://www.pondiuni.edu.in/wp-content/uploads/2025/04/Notice-Hostel-Vacating.pdf",
+            ],
+            title="Hostel Residents Vacating Notice",
+        ),
+        "https://www.pondiuni.edu.in/wp-content/uploads/2025/04/Notice-Hostel-Vacating.pdf",
+    )
+
+    # 7. First URL wins on equal score
+    urls_equal = [
+        "https://www.pondiuni.edu.in/wp-content/uploads/a.pdf",
+        "https://www.pondiuni.edu.in/wp-content/uploads/b.pdf",
+    ]
+    _check("tie → first URL wins", choose_primary_pdf_url(urls_equal), urls_equal[0])
+
+    print(f"\n  {passed} passed, {failed} failed")
+    sys.exit(0 if failed == 0 else 1)
+
+
+if len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "--test":
+    _run_tests()
