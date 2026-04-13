@@ -476,13 +476,37 @@ def tg_document_file(chat_id: str, path: str, caption: str) -> bool:
 def broadcast_text(text: str):
     """Send text to ALL configured chat IDs."""
     for cid in CHAT_IDS:
-        tg_text(cid, text)
+        ok = tg_text(cid, text)
+        if not ok and cid != ADMIN_CHAT_ID:
+            print(f"  ⚠️  Failed to send message to chat {cid} — alerting admin")
+            tg_text(
+                ADMIN_CHAT_ID,
+                f"⚠️ <b>Bot Alert</b>\n\n"
+                f"Failed to send message to chat <code>{cid}</code>.\n"
+                f"Please verify:\n"
+                f"• The bot is a member of the group\n"
+                f"• The bot has permission to send messages\n"
+                f"• The chat ID in <b>TELEGRAM_CHAT_IDS</b> is correct\n\n"
+                f"<i>Tip: For groups, use the numeric chat ID (negative number, e.g. -1001234567890). "
+                f"For supergroups, add the bot as an admin or ensure it is not silenced.</i>",
+            )
         time.sleep(0.5)
 
 
 def broadcast_document_file(path: str, caption: str):
     for cid in CHAT_IDS:
-        tg_document_file(cid, path, caption)
+        ok = tg_document_file(cid, path, caption)
+        if not ok and cid != ADMIN_CHAT_ID:
+            print(f"  ⚠️  Failed to send document to chat {cid} — alerting admin")
+            tg_text(
+                ADMIN_CHAT_ID,
+                f"⚠️ <b>Bot Alert</b>\n\n"
+                f"Failed to send document to chat <code>{cid}</code>.\n"
+                f"Please verify:\n"
+                f"• The bot is a member of the group\n"
+                f"• The bot has permission to send documents\n"
+                f"• The chat ID in <b>TELEGRAM_CHAT_IDS</b> is correct",
+            )
         time.sleep(0.5)
 
 
