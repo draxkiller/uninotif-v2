@@ -136,14 +136,19 @@ def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
                             print(f"  [API] Unrecognized category: {raw!r}")
                 except Exception:
                     pass
-                all_items.append({
+                content_html = item.get("content", {}).get("rendered", "")
+                pdf_url      = _pdf_from_html(content_html)
+                entry = {
                     "id":        str(item["id"]),
                     "title":     BeautifulSoup(item["title"]["rendered"], "html.parser").get_text(strip=True),
                     "link":      item["link"],
                     "category":  f"{cat_name} {cat_emoji}",
                     "issued_by": "",
                     "date":      _fmt_wp_date(item.get("date", "")),
-                })
+                }
+                if pdf_url:
+                    entry["pdf_url"] = pdf_url
+                all_items.append(entry)
             # If every item on this page is already known, older pages will be too
             if seen_ids and all(str(item["id"]) in seen_ids for item in items):
                 break
@@ -225,6 +230,35 @@ def _extract_rows(container, category: str, out: list):
 # ─────────────────────────────────────────────────────────────
 # PDF EXTRACTION + DOWNLOAD
 # ─────────────────────────────────────────────────────────────
+def _pdf_from_html(html: str) -> str | None:
+    """Extract the first PDF URL found in an HTML string."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    # 1. Direct <a href="...pdf">
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if re.search(r"\.pdf(\?|$)", href, re.I):
+            return _abs(href)
+    # 2. <embed>, <iframe>, <object>
+    for tag in soup.find_all(["embed", "iframe", "object"]):
+        src = tag.get("src") or tag.get("data") or ""
+        if re.search(r"\.pdf", src, re.I):
+            return _abs(src)
+    # 3. JS/text patterns
+    for pat in [
+        r'ViewerJS/#(?:https?:)?([^\s"\'<]+\.pdf[^\s"\'<]*)',
+        r'file=([^\s&"\'<]+\.pdf[^\s&"\'<]*)',
+        r'["\']([^"\']*?/(?:uploads|files|documents|notices|notification)[^"\']*?\.pdf)["\']',
+    ]:
+        m = re.search(pat, html, re.I)
+        if m:
+            c = m.group(1)
+            if len(c) > 8:
+                return _abs(c)
+    return None
+
+
 def get_pdf_url(detail_url: str) -> str | None:
     try:
         r = requests.get(detail_url, headers=HEADERS, timeout=30)
@@ -246,30 +280,7 @@ def get_pdf_url(detail_url: str) -> str | None:
             or soup
         )
 
-        # 1. Direct <a href="...pdf"> in content
-        for a in content.find_all("a", href=True):
-            href = a["href"]
-            if re.search(r"\.pdf(\?|$)", href, re.I):
-                return _abs(href)
-
-        # 2. <embed>, <iframe>, <object> in content
-        for tag in content.find_all(["embed", "iframe", "object"]):
-            src = tag.get("src") or tag.get("data") or ""
-            if re.search(r"\.pdf", src, re.I):
-                return _abs(src)
-
-        # 3. JS/text patterns — only inside content's HTML
-        content_html = str(content)
-        for pat in [
-            r'ViewerJS/#(?:https?:)?([^\s"\'<]+\.pdf[^\s"\'<]*)',
-            r'file=([^\s&"\'<]+\.pdf[^\s&"\'<]*)',
-            r'["\']([^"\']*?/(?:uploads|files|documents|notices|notification)[^"\']*?\.pdf)["\']',
-        ]:
-            m = re.search(pat, content_html, re.I)
-            if m:
-                c = m.group(1)
-                if len(c) > 8:
-                    return _abs(c)
+        return _pdf_from_html(str(content))
 
     except Exception as e:
         print(f"    PDF extraction error: {e}")
@@ -405,8 +416,12 @@ def deliver(n: dict):
     link     = n["link"]
     pdf_path = None
 
-    # If the notification link is itself a PDF, use it directly — no page fetch needed.
-    if re.search(r'\.pdf(\?|$)', link, re.I):
+    # Prefer PDF URL extracted from API content (no extra HTTP request).
+    # Fall back to direct-link detection, then full page fetch.
+    if "pdf_url" in n:
+        pdf_url = n["pdf_url"]
+        print(f"    PDF URL from API content")
+    elif re.search(r'\.pdf(\?|$)', link, re.I):
         pdf_url = link
         print(f"    Direct PDF link detected — skipping page fetch")
     else:
@@ -438,24 +453,34 @@ def deliver(n: dict):
 # ─────────────────────────────────────────────────────────────
 # DAILY HEARTBEAT
 # ─────────────────────────────────────────────────────────────
-def maybe_send_heartbeat(seen: dict):
-    """Send a daily 'bot is alive' message to admin at ~8 AM IST."""
-    now = datetime.now(timezone.utc)
-    # IST = UTC+5:30 → 8:00 IST = 2:30 UTC
-    # GitHub Actions can delay scheduled runs by up to 30 min on busy days, so
-    # accept any 5-min slot between 2:30 UTC and 3:00 UTC (8:00–8:30 IST).
-    if not ((now.hour == 2 and now.minute >= 30) or (now.hour == 3 and now.minute < 5)):
-        return
+HEARTBEAT_INTERVAL_HOURS = 20   # send once per day; allow some clock drift
 
-    hb    = load_json(HEARTBEAT_FILE)
-    today = now.strftime("%Y-%m-%d")
-    if hb.get("last_date") == today:
-        return   # already sent today
+def maybe_send_heartbeat(seen: dict):
+    """Send a daily 'bot is alive' message to admin.
+
+    Fires on the first run after HEARTBEAT_INTERVAL_HOURS have elapsed since
+    the last heartbeat (or on the very first run ever).  This approach is
+    immune to GitHub Actions scheduler gaps that could cause a fixed time-
+    window check to be skipped indefinitely.
+    """
+    now = datetime.now(timezone.utc)
+    hb  = load_json(HEARTBEAT_FILE)
+
+    last_sent = hb.get("last_sent")
+    if last_sent:
+        try:
+            last_dt = datetime.fromisoformat(last_sent)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            if (now - last_dt).total_seconds() < HEARTBEAT_INTERVAL_HOURS * 3600:
+                return   # too soon — not yet 20 hours since last heartbeat
+        except Exception:
+            pass  # unparseable timestamp → treat as "never sent"
 
     total = len(seen)
     msg = (
         f"💚 <b>Bot is running fine</b>\n\n"
-        f"🕗 Daily check — {now.strftime('%d %b %Y')}\n"
+        f"🕗 Daily check — {now.strftime('%d %b %Y %H:%M')} UTC\n"
         f"📊 Notifications tracked so far: <b>{total}</b>\n"
         f"⏱ Check interval: every 5 minutes\n\n"
         f"🏛 <i>Pondicherry University Notification Bot</i>"
@@ -463,7 +488,7 @@ def maybe_send_heartbeat(seen: dict):
     if ADMIN_CHAT_ID:
         tg_text(ADMIN_CHAT_ID, msg)
 
-    hb["last_date"] = today
+    hb["last_sent"] = now.isoformat()
     save_json(HEARTBEAT_FILE, hb)
 
 # ─────────────────────────────────────────────────────────────
