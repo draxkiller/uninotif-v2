@@ -249,7 +249,7 @@ def _pdf_from_html(html: str) -> str | None:
     for pat in [
         r'ViewerJS/#(?:https?:)?([^\s"\'<]+\.pdf[^\s"\'<]*)',
         r'file=([^\s&"\'<]+\.pdf[^\s&"\'<]*)',
-        r'["\']([^"\']*?/(?:uploads|files|documents|notices|notification)[^"\']*?\.pdf)["\']',
+        r'["\']([^"\']*?/(?:uploads|files|documents|notices|notification|download|media|pdf|attachments)[^"\']*?\.pdf)["\']',
     ]:
         m = re.search(pat, html, re.I)
         if m:
@@ -287,12 +287,16 @@ def get_pdf_url(detail_url: str) -> str | None:
     return None
 
 
-def download_pdf(pdf_url: str) -> str | None:
+def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
     """
     Download a PDF from pdf_url to a temp file.
     Validates using magic bytes (%PDF) instead of Content-Type header,
     because the university server often returns application/octet-stream
     or other non-standard content types for valid PDFs.
+
+    If the response turns out to be HTML (i.e. a viewer/redirect page rather
+    than a raw PDF), the HTML is parsed for a direct .pdf link and the
+    download is retried once with that URL.
     """
     try:
         uid   = hashlib.md5(pdf_url.encode()).hexdigest()[:10]
@@ -303,21 +307,36 @@ def download_pdf(pdf_url: str) -> str | None:
                 return None
             size        = 0
             first_chunk = None
+            chunks      = []
+            is_pdf      = False   # set to True as soon as we see %PDF magic bytes
             with open(local, "wb") as f:
                 for chunk in r.iter_content(8192):
                     if first_chunk is None:
                         first_chunk = chunk   # capture for magic byte check
+                        is_pdf = chunk.startswith(b"%PDF")
                     f.write(chunk)
                     size += len(chunk)
                     if size > 49 * 1024 * 1024:
                         print("    PDF too large (>49 MB) — skipping")
                         Path(local).unlink(missing_ok=True)
                         return None
+                    # Buffer HTML content (up to 512 KB) so we can extract
+                    # a direct PDF URL if the magic-bytes check later fails.
+                    if _retry and not is_pdf and size <= 512 * 1024:
+                        chunks.append(chunk)
 
             # Validate actual PDF magic bytes — don't trust Content-Type
-            if not first_chunk or not first_chunk.startswith(b"%PDF"):
-                print(f"    Not a valid PDF (bad magic bytes) — skipping")
+            if not first_chunk or not is_pdf:
                 Path(local).unlink(missing_ok=True)
+                # The URL may point to an HTML viewer wrapping the real PDF.
+                # Try to extract a direct PDF link from the page and retry once.
+                if _retry and chunks:
+                    html_content = b"".join(chunks).decode("utf-8", errors="replace")
+                    direct_url = _pdf_from_html(html_content)
+                    if direct_url and direct_url != pdf_url:
+                        print(f"    Viewer page detected — retrying with direct URL → {direct_url[:80]}")
+                        return download_pdf(direct_url, _retry=False)
+                print(f"    Not a valid PDF (bad magic bytes) — skipping")
                 return None
 
         file_size = Path(local).stat().st_size
