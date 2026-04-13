@@ -8,6 +8,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 
 - **7 categories monitored** — Circulars, News & Announcements, Ph.D Notifications, Events, Admission, Careers, Tenders
 - **PDF delivery** — attaches the notification's PDF directly to the Telegram message
+- **AI summary** — optional 2–3 sentence summary of each notification powered by Google Gemini Flash (set `GEMINI_API_KEY` secret to enable)
 - **Multi-recipient** — broadcast to personal chat + group chats simultaneously
 - **Admin-only error alerts** — failures go to the first chat ID only
 - **Daily heartbeat** — fires approximately once per day (first run after 20+ hours since the last heartbeat) so you know the bot is alive
@@ -56,8 +57,11 @@ Go to your repo → **Settings → Secrets and variables → Actions → New rep
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Your bot token from BotFather |
 | `TELEGRAM_CHAT_IDS` | Comma-separated chat IDs, e.g. `123456789,-1001234567890` |
+| `GEMINI_API_KEY` | *(Optional)* Google Gemini API key — enables AI summaries |
 
 > ⚠️ The **first** chat ID is treated as the admin — it receives error alerts and the daily heartbeat. Additional IDs receive notifications only.
+
+> 💡 **AI summaries** are silently skipped when `GEMINI_API_KEY` is not set, so the bot works without it. To disable summaries while keeping the key, add a repository variable `ENABLE_AI_SUMMARY = false` (Settings → Secrets and variables → Actions → Variables).
 
 ### 5. Enable Actions & set permissions
 
@@ -107,6 +111,8 @@ If you want to wipe `seen.json` and re-catalogue from scratch (without sending a
 requests
 beautifulsoup4
 lxml
+google-generativeai   # AI summaries (optional feature)
+pdfplumber            # PDF text extraction for AI summaries
 ```
 
 Install locally with:
