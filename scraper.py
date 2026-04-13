@@ -137,7 +137,7 @@ def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
                 except Exception:
                     pass
                 content_html = item.get("content", {}).get("rendered", "")
-                pdf_url      = _pdf_from_html(content_html)
+                pdf_urls     = _pdfs_from_html(content_html)
                 entry = {
                     "id":        str(item["id"]),
                     "title":     BeautifulSoup(item["title"]["rendered"], "html.parser").get_text(strip=True),
@@ -146,8 +146,8 @@ def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
                     "issued_by": "",
                     "date":      _fmt_wp_date(item.get("date", "")),
                 }
-                if pdf_url:
-                    entry["pdf_url"] = pdf_url
+                if pdf_urls:
+                    entry["pdf_urls"] = pdf_urls
                 all_items.append(entry)
             # If every item on this page is already known, older pages will be too
             if seen_ids and all(str(item["id"]) in seen_ids for item in items):
@@ -230,36 +230,44 @@ def _extract_rows(container, category: str, out: list):
 # ─────────────────────────────────────────────────────────────
 # PDF EXTRACTION + DOWNLOAD
 # ─────────────────────────────────────────────────────────────
-def _pdf_from_html(html: str) -> str | None:
-    """Extract the first PDF URL found in an HTML string."""
+def _pdfs_from_html(html: str) -> list[str]:
+    """Extract all PDF URLs found in an HTML string (deduplicated, order-preserved)."""
     if not html:
-        return None
+        return []
     soup = BeautifulSoup(html, "html.parser")
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(url: str):
+        abs_url = _abs(url)
+        if abs_url not in seen:
+            seen.add(abs_url)
+            found.append(abs_url)
+
     # 1. Direct <a href="...pdf">
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if re.search(r"\.pdf(\?|$)", href, re.I):
-            return _abs(href)
+            _add(href)
     # 2. <embed>, <iframe>, <object>
     for tag in soup.find_all(["embed", "iframe", "object"]):
         src = tag.get("src") or tag.get("data") or ""
         if re.search(r"\.pdf", src, re.I):
-            return _abs(src)
+            _add(src)
     # 3. JS/text patterns
     for pat in [
         r'ViewerJS/#(?:https?:)?([^\s"\'<]+\.pdf[^\s"\'<]*)',
         r'file=([^\s&"\'<]+\.pdf[^\s&"\'<]*)',
         r'["\']([^"\']*?/(?:uploads|files|documents|notices|notification|download|media|pdf|attachments)[^"\']*?\.pdf)["\']',
     ]:
-        m = re.search(pat, html, re.I)
-        if m:
+        for m in re.finditer(pat, html, re.I):
             c = m.group(1)
             if len(c) > 8:  # sanity-check: skip trivially short matches (e.g. ".pdf" alone)
-                return _abs(c)
-    return None
+                _add(c)
+    return found
 
 
-def get_pdf_url(detail_url: str) -> str | None:
+def get_pdf_urls(detail_url: str) -> list[str]:
     try:
         r = requests.get(detail_url, headers=HEADERS, timeout=30)
         r.raise_for_status()
@@ -280,11 +288,11 @@ def get_pdf_url(detail_url: str) -> str | None:
             or soup
         )
 
-        return _pdf_from_html(str(content))
+        return _pdfs_from_html(str(content))
 
     except Exception as e:
         print(f"    PDF extraction error: {e}")
-    return None
+    return []
 
 
 def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
@@ -332,7 +340,7 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
                 # Try to extract a direct PDF link from the page and retry once.
                 if _retry and chunks:
                     html_content = b"".join(chunks).decode("utf-8", errors="replace")
-                    direct_url = _pdf_from_html(html_content)
+                    direct_url = next(iter(_pdfs_from_html(html_content)), None)
                     if direct_url and direct_url != pdf_url:
                         print(f"    Viewer page detected — retrying with direct URL → {direct_url[:80]}")
                         return download_pdf(direct_url, _retry=False)
@@ -431,42 +439,64 @@ def build_caption(n: dict) -> str:
 # DELIVER ONE NOTIFICATION
 # ─────────────────────────────────────────────────────────────
 def deliver(n: dict):
-    caption  = build_caption(n)
-    link     = n["link"]
-    pdf_path = None
+    caption = build_caption(n)
+    link    = n["link"]
 
-    # Prefer PDF URL extracted from API content (no extra HTTP request).
+    # Collect all PDF URLs for this notification.
+    # Prefer PDF URLs extracted from API content (no extra HTTP request).
     # Fall back to direct-link detection, then full page fetch.
-    if "pdf_url" in n:
-        pdf_url = n["pdf_url"]
+    if "pdf_urls" in n:
+        pdf_urls = n["pdf_urls"]
+        print(f"    {len(pdf_urls)} PDF URL(s) from API content")
+    elif "pdf_url" in n:
+        pdf_urls = [n["pdf_url"]]
         print(f"    PDF URL from API content")
     elif re.search(r'\.pdf(\?|$)', link, re.I):
-        pdf_url = link
+        pdf_urls = [link]
         print(f"    Direct PDF link detected — skipping page fetch")
     else:
-        pdf_url = get_pdf_url(link)
+        pdf_urls = get_pdf_urls(link)
 
+    pdf_paths: list[str] = []
+    failed_urls: list[str] = []
     try:
-        if pdf_url:
+        for pdf_url in pdf_urls:
             print(f"    PDF found → {pdf_url[:80]}")
             pdf_path = download_pdf(pdf_url)
-            if not pdf_path:
-                print("    PDF download failed — sending text message with link instead")
+            if pdf_path:
+                pdf_paths.append(pdf_path)
+            else:
+                print("    PDF download failed — will include link in message")
+                failed_urls.append(pdf_url)
 
-        if pdf_path:
-            print(f"    Sending PDF file to {len(CHAT_IDS)} chat(s)...")
-            broadcast_document_file(pdf_path, caption)
+        if pdf_paths:
+            total = len(pdf_paths)
+            for i, pdf_path in enumerate(pdf_paths):
+                if total > 1:
+                    doc_caption = caption if i == 0 else f"📎 <b>Attachment {i + 1}/{total}</b>"
+                else:
+                    doc_caption = caption
+                print(f"    Sending PDF {i + 1}/{total} to {len(CHAT_IDS)} chat(s)...")
+                broadcast_document_file(pdf_path, doc_caption)
+                if i < total - 1:
+                    time.sleep(1)  # brief pause between documents to respect Telegram rate limits
+            # Append download links for any PDFs that failed to download
+            if failed_urls:
+                extra = "".join(f'\n📎 <a href="{u}">Download PDF ↗</a>' for u in failed_urls)
+                broadcast_text(caption + extra)
         else:
-            # No PDF file — send text. If we found a URL but couldn't download it,
-            # append it to the caption so the user can tap to open the PDF manually.
+            # No PDF files — send text. If we found URLs but couldn't download them,
+            # append them to the caption so the user can tap to open the PDFs manually.
             # (We do NOT use tg_document_url because Telegram's servers cannot fetch
             #  PDFs from the university's server — it requires browser-like headers.)
-            if pdf_url:
-                caption += f'\n📎 <a href="{pdf_url}">Download PDF ↗</a>'
+            if pdf_urls:
+                for i, pdf_url in enumerate(pdf_urls):
+                    label = f"Download PDF {i + 1}" if len(pdf_urls) > 1 else "Download PDF"
+                    caption += f'\n📎 <a href="{pdf_url}">{label} ↗</a>'
             print(f"    Sending text message to {len(CHAT_IDS)} chat(s)...")
             broadcast_text(caption)
     finally:
-        if pdf_path:
+        for pdf_path in pdf_paths:
             Path(pdf_path).unlink(missing_ok=True)
 
 # ─────────────────────────────────────────────────────────────
