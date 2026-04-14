@@ -3,7 +3,7 @@
 Pondicherry University — Telegram Notification Bot  v2
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✦ All 7 categories monitored
-✦ Multi-recipient (personal + group)
+✦ Multi-recipient (users)
 ✦ Error alerts to admin only
 ✦ Daily heartbeat
 ✦ 5-minute checks via GitHub Actions
@@ -24,8 +24,8 @@ if not re.match(r'^\d+:[\w-]{35,}$', TELEGRAM_TOKEN):
         "TELEGRAM_BOT_TOKEN looks invalid — expected format: <bot_id>:<35+ char token>. "
         "Check your GitHub secret."
     )
-# Comma-separated chat IDs  e.g.  "123456789,-1001234567890"
-# First ID = admin (receives error alerts too)
+# Comma-separated user chat IDs  e.g.  "123456789,987654321"
+# First ID = admin
 _raw_ids         = os.environ.get("TELEGRAM_CHAT_IDS", os.environ.get("TELEGRAM_CHAT_ID", ""))
 CHAT_IDS         = [c.strip() for c in _raw_ids.split(",") if c.strip()]
 ADMIN_CHAT_ID    = CHAT_IDS[0] if CHAT_IDS else ""
@@ -537,37 +537,13 @@ def tg_document_file(chat_id: str, path: str, caption: str) -> bool:
 def broadcast_text(text: str):
     """Send text to ALL configured chat IDs."""
     for cid in CHAT_IDS:
-        ok = tg_text(cid, text)
-        if not ok and cid != ADMIN_CHAT_ID:
-            print(f"  ⚠️  Failed to send message to chat {cid} — alerting admin")
-            tg_text(
-                ADMIN_CHAT_ID,
-                f"⚠️ <b>Bot Alert</b>\n\n"
-                f"Failed to send message to chat <code>{cid}</code>.\n"
-                f"Please verify:\n"
-                f"• The bot is a member of the group\n"
-                f"• The bot has permission to send messages\n"
-                f"• The chat ID in <b>TELEGRAM_CHAT_IDS</b> is correct\n\n"
-                f"<i>Tip: For groups, use the numeric chat ID (negative number, e.g. -1001234567890). "
-                f"For supergroups, add the bot as an admin or ensure it is not silenced.</i>",
-            )
+        tg_text(cid, text)
         time.sleep(0.5)
 
 
 def broadcast_document_file(path: str, caption: str):
     for cid in CHAT_IDS:
-        ok = tg_document_file(cid, path, caption)
-        if not ok and cid != ADMIN_CHAT_ID:
-            print(f"  ⚠️  Failed to send document to chat {cid} — alerting admin")
-            tg_text(
-                ADMIN_CHAT_ID,
-                f"⚠️ <b>Bot Alert</b>\n\n"
-                f"Failed to send document to chat <code>{cid}</code>.\n"
-                f"Please verify:\n"
-                f"• The bot is a member of the group\n"
-                f"• The bot has permission to send documents\n"
-                f"• The chat ID in <b>TELEGRAM_CHAT_IDS</b> is correct",
-            )
+        tg_document_file(cid, path, caption)
         time.sleep(0.5)
 
 
