@@ -9,7 +9,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 - **7 categories monitored** — Circulars, News & Announcements, Ph.D Notifications, Events, Admission, Careers, Tenders
 - **PDF delivery** — attaches the notification's PDF directly to the Telegram message
 - **AI summary** — optional 2–3 sentence summary of each notification powered by Google Gemini Flash (set `GEMINI_API_KEY` secret to enable)
-- **Multi-recipient** — broadcast to personal chat + group chats simultaneously
+- **Multi-recipient** — broadcast to multiple user chats
 - **Admin-only error alerts** — failures go to the first chat ID only
 - **Daily heartbeat** — fires approximately once per day (first run after 20+ hours since the last heartbeat) so you know the bot is alive
 - **Smart deduplication** — `seen.json` committed to repo after every run; re-sends are prevented even if the job crashes mid-run
@@ -47,7 +47,7 @@ Create a **private** repository on GitHub and push these files.
 ### 3. Get your Chat ID(s)
 
 - **Personal chat**: Message [@userinfobot](https://t.me/userinfobot) — it replies with your chat ID
-- **Group chat**: Add your bot to the group, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` and look for `"chat":{"id":-100xxxxxxxxx}`
+- Add each Telegram user chat ID you want to notify (comma-separated in `TELEGRAM_CHAT_IDS`)
 
 ### 4. Add GitHub Secrets
 
@@ -56,7 +56,7 @@ Go to your repo → **Settings → Secrets and variables → Actions → New rep
 | Secret name | Value |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Your bot token from BotFather |
-| `TELEGRAM_CHAT_IDS` | Comma-separated chat IDs, e.g. `123456789,-1001234567890` |
+| `TELEGRAM_CHAT_IDS` | Comma-separated user chat IDs, e.g. `123456789,987654321` |
 | `GEMINI_API_KEY` | *(Optional)* Google Gemini API key — enables AI summaries |
 
 > ⚠️ The **first** chat ID is treated as the admin — it receives error alerts and the daily heartbeat. Additional IDs receive notifications only.
