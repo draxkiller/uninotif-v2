@@ -71,15 +71,17 @@ GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 ENABLE_AI_SUMMARY  = os.environ.get("ENABLE_AI_SUMMARY", "true").lower() not in ("false", "0", "no")
 AI_SUMMARY_ENABLED = bool(GEMINI_API_KEY) and ENABLE_AI_SUMMARY
 
-_gemini_model = None   # lazily initialised
+# Number of most-recently-notified entries to re-send (0 = disabled, max 10)
+RESEND_LAST = min(10, max(0, int(os.environ.get("RESEND_LAST", "0") or "0")))
 
-def _get_gemini_model():
-    global _gemini_model
-    if _gemini_model is None:
-        import google.generativeai as genai  # noqa: PLC0415
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel("gemini-2.0-flash")
-    return _gemini_model
+_gemini_client = None   # lazily initialised
+
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai  # noqa: PLC0415
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _gemini_client
 
 # ─────────────────────────────────────────────────────────────
 # SEEN / HEARTBEAT STORE
@@ -428,6 +430,52 @@ def choose_primary_pdf_url(urls: list[str], title: str = "") -> str | None:
     return max(urls, key=_score)
 
 
+def _sort_pdf_urls(urls: list[str], title: str = "") -> list[str]:
+    """Return all PDF/image URLs sorted by relevance (primary first).
+
+    Uses the same scoring as choose_primary_pdf_url but keeps every URL instead
+    of discarding all but the top-ranked one.  Duplicate URLs are removed while
+    preserving the sorted order.
+    """
+    if not urls:
+        return []
+
+    _BOOST_TERMS = ("circular", "notification", "notice", "order", "corrigendum")
+    _PENALTY_TERMS = (
+        "annex", "appendix", "attachment", "form", "application",
+        "brochure", "prospectus", "timetable", "schedule",
+        "guidelines", "instruction", "logo", "favicon",
+    )
+    title_words = [w for w in re.findall(r"[a-z0-9]+", title.lower()) if len(w) >= 6]
+
+    def _score(url: str) -> int:
+        s = 0
+        lu = url.lower()
+        if re.search(r"\.pdf(\?|$)", url, re.I):
+            s += 50
+        if "pondiuni.edu.in" in lu:
+            s += 10
+        if "/wp-content/uploads/" in lu:
+            s += 10
+        if any(k in lu for k in _BOOST_TERMS):
+            s += 25
+        for k in _PENALTY_TERMS:
+            if k in lu:
+                s -= 25
+        for w in title_words:
+            if w in lu:
+                s += 2
+        return s
+
+    seen: set[str] = set()
+    deduped = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return sorted(deduped, key=_score, reverse=True)
+
+
 def get_pdf_urls(detail_url: str) -> list[str]:
     try:
         r = requests.get(detail_url, headers=HEADERS, timeout=30)
@@ -587,7 +635,7 @@ def get_ai_summary(text: str) -> str:
         return ""
     try:
         truncated = text[:_AI_MAX_CHARS]
-        model  = _get_gemini_model()
+        client = _get_gemini_client()
         prompt = (
             "You are a helpful assistant for university students. "
             "Summarize the following university notification in 2-3 concise sentences. "
@@ -595,7 +643,7 @@ def get_ai_summary(text: str) -> str:
             "Reply with the summary only, no preamble.\n\n"
             f"{truncated}"
         )
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
         summary  = response.text.strip()
         print(f"    AI summary generated ({len(summary)} chars)")
         return summary
@@ -685,16 +733,15 @@ def build_caption(n: dict, summary: str = "") -> str:
 def deliver(n: dict):
     link    = n["link"]
 
-    # Collect PDF URL(s) for this notification, then select the single primary one.
+    # Collect PDF URL(s) for this notification, sorted by relevance (primary first).
     # Prefer PDF URLs extracted from API content (no extra HTTP request).
     # Fall back to direct-link detection, then full page fetch.
     if "pdf_urls" in n:
         candidates = n["pdf_urls"]
         print(f"    {len(candidates)} PDF candidate(s) from API content")
-        primary = choose_primary_pdf_url(candidates, title=n.get("title", ""))
-        if primary:
-            print(f"    Selected primary PDF → {primary[:80]}")
-        pdf_urls = [primary] if primary else []
+        pdf_urls = _sort_pdf_urls(candidates, title=n.get("title", ""))
+        if pdf_urls:
+            print(f"    Primary PDF → {pdf_urls[0][:80]}")
     elif "pdf_url" in n:
         pdf_urls = [n["pdf_url"]]
         print(f"    PDF URL from API content")
@@ -704,10 +751,9 @@ def deliver(n: dict):
     else:
         candidates = get_pdf_urls(link)
         print(f"    {len(candidates)} PDF candidate(s) found on page")
-        primary = choose_primary_pdf_url(candidates, title=n.get("title", ""))
-        if primary:
-            print(f"    Selected primary PDF → {primary[:80]}")
-        pdf_urls = [primary] if primary else []
+        pdf_urls = _sort_pdf_urls(candidates, title=n.get("title", ""))
+        if pdf_urls:
+            print(f"    Primary PDF → {pdf_urls[0][:80]}")
 
     pdf_paths: list[str] = []
     failed_urls: list[str] = []
@@ -842,6 +888,73 @@ def prune_seen(seen: dict) -> dict:
     return pruned
 
 # ─────────────────────────────────────────────────────────────
+# RESEND HELPER
+# ─────────────────────────────────────────────────────────────
+def _resend_last(n: int, seen: dict, recent_notifications: list[dict]):
+    """Re-deliver the last *n* notified entries.
+
+    Strategy:
+    1. Sort seen entries that have a real ISO timestamp (i.e. not "seeded")
+       in descending order and take the first *n*.
+    2. Try to match each against the already-fetched *recent_notifications*
+       list so we reuse the full notification object (including pdf_urls).
+    3. If not found there, build a minimal stub from seen metadata and
+       re-fetch the PDF from the notification's link URL.
+    """
+    print(f"\n  🔁 RESEND mode — re-delivering last {n} notification(s).")
+
+    # Collect entries with a parseable ISO timestamp
+    timed: list[tuple[datetime, str, dict]] = []
+    for nid, meta in seen.items():
+        ts_str = meta.get("notified", "")
+        if ts_str in ("", "seeded"):
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            timed.append((ts, nid, meta))
+        except Exception:
+            pass
+
+    if not timed:
+        print("  No previously-notified entries found in seen.json — nothing to resend.")
+        return
+
+    timed.sort(key=lambda x: x[0], reverse=True)
+    targets = timed[:n]
+
+    # Build a lookup by id from the freshly-fetched notifications
+    fresh_by_id = {item["id"]: item for item in recent_notifications}
+
+    for ts, nid, meta in targets:
+        title = meta.get("title", nid)
+        print(f"\n  🔁 Resending: {title[:70]}")
+
+        notif = fresh_by_id.get(nid)
+        if notif is None:
+            # Build a stub so deliver() can at least send a text message
+            notif = {
+                "id":        nid,
+                "title":     title,
+                "link":      nid if nid.startswith("http") else "",
+                "category":  meta.get("category", "General"),
+                "issued_by": "",
+                "date":      meta.get("date", ""),
+            }
+
+        try:
+            deliver(notif)
+        except Exception as e:
+            print(f"    ERROR resending: {e}")
+            alert_admin(f"Error resending notification:\n<b>{title}</b>\n\n{e}")
+
+        time.sleep(3)
+
+    print(f"\n  ✅ Resend complete ({len(targets)} notification(s)).")
+
+
+# ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
 def main():
@@ -936,6 +1049,10 @@ def main():
     else:
         print(f"\n  ✅ Done. {new_count} new | {errors} errors.")
         maybe_send_heartbeat(seen)
+
+    # ── Resend last N notifications ───────────────────────────
+    if RESEND_LAST > 0 and not is_first_run:
+        _resend_last(RESEND_LAST, seen, notifications)
 
 
 if __name__ == "__main__":
