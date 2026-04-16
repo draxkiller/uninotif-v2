@@ -359,9 +359,12 @@ def _pdfs_from_html(html: str) -> list[str]:
         if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp)(\?|$)", src, re.I):
             _add(src)
     # 3. <img src="...jpeg/png"> — scanned notices are often embedded as images
+    # Note: .gif is intentionally excluded here; GIF files found in <img> tags are
+    # almost always decorative UI elements (spinners, icons).  Genuine GIF attachments
+    # are still captured above via <a href="...gif"> links.
     for tag in soup.find_all("img"):
         src = (tag.get("src") or "").strip()
-        if re.search(r"\.(jpg|jpeg|png|gif|webp)(\?|$)", src, re.I):
+        if re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", src, re.I):
             _add(src)
     # 4. JS/text patterns (PDF-specific)
     for pat in [
@@ -709,6 +712,43 @@ def broadcast_document_file(path: str, caption: str):
         time.sleep(0.5)
 
 
+def tg_media_group_files(chat_id: str, paths: list[str], caption: str) -> bool:
+    """Send 2–10 files as a single Telegram media group (album).
+
+    The full caption (with HTML parse mode) is attached to the first item only,
+    which is how Telegram's sendMediaGroup API works.
+    """
+    media = []
+    files = {}
+    handles: list = []
+    try:
+        for i, path in enumerate(paths):
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            key = f"file{i}"
+            item: dict = {"type": "document", "media": f"attach://{key}"}
+            if i == 0:
+                item["caption"] = caption[:1024]
+                item["parse_mode"] = "HTML"
+            media.append(item)
+            fh = open(path, "rb")
+            handles.append(fh)
+            files[key] = (Path(path).name, fh, mime)
+        return _tg_post("sendMediaGroup", chat_id,
+            data={"chat_id": chat_id, "media": json.dumps(media)},
+            files=files,
+        )
+    finally:
+        for fh in handles:
+            fh.close()
+
+
+def broadcast_media_group_files(paths: list[str], caption: str):
+    """Broadcast a media group to all configured chat IDs."""
+    for cid in CHAT_IDS:
+        tg_media_group_files(cid, paths, caption)
+        time.sleep(0.5)
+
+
 def alert_admin(text: str):
     """Send error/status messages to admin only."""
     if ADMIN_CHAT_ID:
@@ -790,16 +830,20 @@ def deliver(n: dict):
         caption = build_caption(n, summary)
 
         if pdf_paths:
-            total = len(pdf_paths)
-            for i, pdf_path in enumerate(pdf_paths):
-                if total > 1:
-                    doc_caption = caption if i == 0 else f"📎 <b>Attachment {i + 1}/{total}</b>"
-                else:
-                    doc_caption = caption
-                print(f"    Sending PDF {i + 1}/{total} to {len(CHAT_IDS)} chat(s)...")
-                broadcast_document_file(pdf_path, doc_caption)
-                if i < total - 1:
-                    time.sleep(1)  # brief pause between documents to respect Telegram rate limits
+            if len(pdf_paths) == 1:
+                print(f"    Sending 1 attachment to {len(CHAT_IDS)} chat(s)...")
+                broadcast_document_file(pdf_paths[0], caption)
+            else:
+                # Send all attachments as a single media group (album).
+                # Telegram supports 2–10 items per group; chunk larger sets.
+                total = len(pdf_paths)
+                print(f"    Sending {total} attachments as media group to {len(CHAT_IDS)} chat(s)...")
+                for chunk_start in range(0, total, 10):
+                    chunk = pdf_paths[chunk_start:chunk_start + 10]
+                    chunk_caption = caption if chunk_start == 0 else f"📎 <b>Attachments {chunk_start + 1}–{chunk_start + len(chunk)}/{total}</b>"
+                    broadcast_media_group_files(chunk, chunk_caption)
+                    if chunk_start + 10 < total:
+                        time.sleep(1)
             # Append download links for any PDFs that failed to download
             if failed_urls:
                 extra = "".join(f'\n📎 <a href="{u}">Download PDF ↗</a>' for u in failed_urls)
