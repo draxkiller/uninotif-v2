@@ -356,7 +356,7 @@ def _pdfs_from_html(html: str) -> list[str]:
     # 2. <embed>, <iframe>, <object>
     for tag in soup.find_all(["embed", "iframe", "object"]):
         src = tag.get("src") or tag.get("data") or ""
-        if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp)", src, re.I):
+        if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp)(\?|$)", src, re.I):
             _add(src)
     # 3. <img src="...jpeg/png"> — scanned notices are often embedded as images
     for tag in soup.find_all("img"):
