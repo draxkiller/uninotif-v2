@@ -359,9 +359,12 @@ def _pdfs_from_html(html: str) -> list[str]:
         if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp)(\?|$)", src, re.I):
             _add(src)
     # 3. <img src="...jpeg/png"> — scanned notices are often embedded as images
+    # Note: .gif is intentionally excluded here; GIF files found in <img> tags are
+    # almost always decorative UI elements (spinners, icons).  Genuine GIF attachments
+    # are still captured above via <a href="...gif"> links.
     for tag in soup.find_all("img"):
         src = (tag.get("src") or "").strip()
-        if re.search(r"\.(jpg|jpeg|png|gif|webp)(\?|$)", src, re.I):
+        if re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", src, re.I):
             _add(src)
     # 4. JS/text patterns (PDF-specific)
     for pat in [
