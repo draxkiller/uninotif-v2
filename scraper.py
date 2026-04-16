@@ -10,7 +10,7 @@ Pondicherry University — Telegram Notification Bot  v2
 ✦ AI summary via Google Gemini Flash (optional)
 """
 
-import os, re, json, time, hashlib, requests
+import mimetypes, os, re, json, time, hashlib, requests
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
@@ -54,6 +54,13 @@ TAB_SLUGS = {
     "Tenders":    ("Tenders",             "📝"),
 }
 
+# Extra pages to scrape for admission and distance-education notifications.
+# These are WordPress section pages whose child links are treated as notifications.
+EXTRA_SECTIONS = [
+    (f"{BASE_URL}/admission/",                          "Admission 🏫"),
+    (f"{BASE_URL}/directorate-of-distance-education/", "Distance Education 📚"),
+]
+
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # ─────────────────────────────────────────────────────────────
@@ -71,7 +78,7 @@ def _get_gemini_model():
     if _gemini_model is None:
         import google.generativeai as genai  # noqa: PLC0415
         genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+        _gemini_model = genai.GenerativeModel("gemini-2.0-flash")
     return _gemini_model
 
 # ─────────────────────────────────────────────────────────────
@@ -114,9 +121,19 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     results = _try_wp_rest_api(seen_ids)
     if results is not None:
         print(f"  [API]  {len(results)} notifications via WP REST API")
-        return results
-    results = _scrape_html()
-    print(f"  [HTML] {len(results)} notifications via HTML scrape")
+    else:
+        results = _scrape_html()
+        print(f"  [HTML] {len(results)} notifications via HTML scrape")
+
+    # Also scrape admission and distance-education section pages.
+    existing_links = {r["link"] for r in results}
+    for section_url, category in EXTRA_SECTIONS:
+        extras = _scrape_section_links(section_url, category)
+        for item in extras:
+            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+                results.append(item)
+                existing_links.add(item["link"])
+
     return results
 
 
@@ -248,11 +265,75 @@ def _extract_rows(container, category: str, out: list):
             "category": category, "issued_by": issued_by, "date": date_str,
         })
 
+
+def _scrape_section_links(section_url: str, category: str) -> list[dict]:
+    """Scrape a WordPress section page (e.g. /admission/) for child notification links.
+
+    Extracts links whose href starts with the section URL, so only actual
+    child pages/posts are returned — navigation and footer links are excluded.
+    """
+    # Minimum number of characters a link title must have to be considered a notification.
+    _MIN_TITLE_LEN = 10
+    # Href substrings that indicate non-content links (JS actions, social sites, etc.)
+    _SKIP_HREF = ("javascript:", "mailto:", "facebook.com", "twitter.com")
+
+    try:
+        r = requests.get(section_url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  Failed to fetch section {section_url}: {e}")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    # Strip navigation / decorative regions
+    for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
+        tag.decompose()
+    for tag in soup.find_all(True, {"class": re.compile(
+            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+        tag.decompose()
+
+    content = (
+        soup.find("main")
+        or soup.find("div", {"class": re.compile(r"entry[._-]content|post[._-]content|content[._-]area|main[._-]content", re.I)})
+        or soup
+    )
+
+    section_base = section_url.rstrip("/")
+    results: list[dict] = []
+    seen_links: set = set()
+
+    for a in content.find_all("a", href=True):
+        href  = _abs(a["href"])
+        title = a.get_text(strip=True)
+        if not title or len(title) < _MIN_TITLE_LEN:
+            continue
+        if href in seen_links:
+            continue
+        if any(skip in href for skip in _SKIP_HREF):
+            continue
+        if "pondiuni.edu.in" not in href:
+            continue
+        # Only include links that are children of this section (not nav links, etc.)
+        if not href.rstrip("/").startswith(section_base + "/"):
+            continue
+        seen_links.add(href)
+        results.append({
+            "id":        href,
+            "title":     title,
+            "link":      href,
+            "category":  category,
+            "issued_by": "",
+            "date":      "",
+        })
+
+    print(f"  [Section] {len(results)} link(s) found under {section_url}")
+    return results
+
 # ─────────────────────────────────────────────────────────────
 # PDF EXTRACTION + DOWNLOAD
 # ─────────────────────────────────────────────────────────────
 def _pdfs_from_html(html: str) -> list[str]:
-    """Extract all PDF URLs found in an HTML string (deduplicated, order-preserved)."""
+    """Extract all PDF and image attachment URLs found in an HTML string (deduplicated, order-preserved)."""
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -265,17 +346,17 @@ def _pdfs_from_html(html: str) -> list[str]:
             seen.add(abs_url)
             found.append(abs_url)
 
-    # 1. Direct <a href="...pdf">
+    # 1. Direct <a href="...pdf/image">
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        if re.search(r"\.pdf(\?|$)", href, re.I):
+        if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp)(\?|$)", href, re.I):
             _add(href)
     # 2. <embed>, <iframe>, <object>
     for tag in soup.find_all(["embed", "iframe", "object"]):
         src = tag.get("src") or tag.get("data") or ""
-        if re.search(r"\.pdf", src, re.I):
+        if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp)", src, re.I):
             _add(src)
-    # 3. JS/text patterns
+    # 3. JS/text patterns (PDF-specific)
     for pat in [
         r'ViewerJS/#(?:https?:)?([^\s"\'<]+\.pdf[^\s"\'<]*)',
         r'file=([^\s&"\'<]+\.pdf[^\s&"\'<]*)',
@@ -375,70 +456,97 @@ def get_pdf_urls(detail_url: str) -> list[str]:
     return []
 
 
+def _detect_file_ext(first_chunk: bytes) -> str | None:
+    """Return the file extension for a known file type based on magic bytes, or None."""
+    if first_chunk.startswith(b"%PDF"):
+        return ".pdf"
+    if first_chunk.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if first_chunk.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if first_chunk.startswith(b"GIF8"):
+        return ".gif"
+    if (first_chunk.startswith(b"RIFF") and len(first_chunk) >= 12
+            and first_chunk[8:12] == b"WEBP"):
+        return ".webp"
+    return None
+
+
+def _tmp_attachment_path(url: str, ext: str = ".bin") -> str:
+    """Return a deterministic /tmp path for an attachment URL."""
+    uid = hashlib.md5(url.encode()).hexdigest()[:10]
+    return f"/tmp/pu_{uid}{ext}"
+
+
 def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
     """
-    Download a PDF from pdf_url to a temp file.
-    Validates using magic bytes (%PDF) instead of Content-Type header,
-    because the university server often returns application/octet-stream
-    or other non-standard content types for valid PDFs.
+    Download a PDF or image attachment from pdf_url to a temp file.
+    Validates using magic bytes instead of Content-Type header.
 
-    If the response turns out to be HTML (i.e. a viewer/redirect page rather
-    than a raw PDF), the HTML is parsed for a direct .pdf link and the
-    download is retried once with that URL.
+    Supported types: PDF (%PDF), JPEG, PNG, GIF, WEBP.
+
+    If the response is an HTML viewer/redirect page rather than a raw file,
+    the HTML is parsed for a direct attachment link and the download is
+    retried once with that URL.
     """
+    local = _tmp_attachment_path(pdf_url)   # .bin while downloading; renamed after detection
     try:
-        uid   = hashlib.md5(pdf_url.encode()).hexdigest()[:10]
-        local = f"/tmp/pu_{uid}.pdf"
         with requests.get(pdf_url, headers=HEADERS, timeout=60, stream=True) as r:
             if r.status_code != 200:
-                print(f"    PDF download HTTP {r.status_code} — skipping")
+                print(f"    Attachment download HTTP {r.status_code} — skipping")
                 return None
             size        = 0
             first_chunk = None
             chunks      = []
-            is_pdf      = False   # set to True as soon as we see %PDF magic bytes
+            detected_ext = None
             with open(local, "wb") as f:
                 for chunk in r.iter_content(8192):
                     if first_chunk is None:
-                        first_chunk = chunk   # capture for magic byte check
-                        is_pdf = chunk.startswith(b"%PDF")
+                        first_chunk = chunk
+                        detected_ext = _detect_file_ext(chunk)
                     f.write(chunk)
                     size += len(chunk)
                     if size > 49 * 1024 * 1024:
-                        print("    PDF too large (>49 MB) — skipping")
+                        print("    Attachment too large (>49 MB) — skipping")
                         Path(local).unlink(missing_ok=True)
                         return None
                     # Buffer HTML content (up to 512 KB) so we can extract
-                    # a direct PDF URL if the magic-bytes check later fails.
-                    if _retry and not is_pdf and size <= 512 * 1024:
+                    # a direct attachment URL if the magic-bytes check later fails.
+                    if _retry and detected_ext is None and size <= 512 * 1024:
                         chunks.append(chunk)
 
-            # Validate actual PDF magic bytes — don't trust Content-Type
-            if not first_chunk or not is_pdf:
+            # Validate using magic bytes — don't trust Content-Type
+            if not first_chunk or detected_ext is None:
                 Path(local).unlink(missing_ok=True)
-                # The URL may point to an HTML viewer wrapping the real PDF.
-                # Try to extract a direct PDF link from the page and retry once.
+                # The URL may point to an HTML viewer wrapping the real file.
+                # Try to extract a direct link from the page and retry once.
                 if _retry and chunks:
                     html_content = b"".join(chunks).decode("utf-8", errors="replace")
                     candidates   = _pdfs_from_html(html_content)
-                    print(f"    Viewer page: {len(candidates)} PDF candidate(s) found")
+                    print(f"    Viewer page: {len(candidates)} attachment candidate(s) found")
                     direct_url   = choose_primary_pdf_url(candidates)
                     if direct_url and direct_url != pdf_url:
-                        print(f"    Viewer page detected — retrying with primary PDF → {direct_url[:80]}")
+                        print(f"    Viewer page detected — retrying with primary → {direct_url[:80]}")
                         return download_pdf(direct_url, _retry=False)
-                print(f"    Not a valid PDF (bad magic bytes) — skipping")
+                print(f"    Not a valid PDF or image (bad magic bytes) — skipping")
                 return None
 
-        file_size = Path(local).stat().st_size
+        # Rename to the correct extension now that we know the file type
+        final = _tmp_attachment_path(pdf_url, detected_ext)
+        Path(local).rename(final)
+
+        file_size = Path(final).stat().st_size
         if file_size <= 512:
-            print(f"    PDF too small ({file_size} bytes) — skipping")
+            print(f"    Attachment too small ({file_size} bytes) — skipping")
+            Path(final).unlink(missing_ok=True)
             return None
 
-        print(f"    PDF downloaded OK ({file_size // 1024} KB)")
-        return local
+        print(f"    Attachment downloaded OK ({file_size // 1024} KB, type: {detected_ext})")
+        return final
 
     except Exception as e:
-        print(f"    PDF download error: {e}")
+        print(f"    Attachment download error: {e}")
+        Path(local).unlink(missing_ok=True)
         return None
 
 
@@ -527,10 +635,11 @@ def tg_text(chat_id: str, text: str) -> bool:
 
 
 def tg_document_file(chat_id: str, path: str, caption: str) -> bool:
+    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
     with open(path, "rb") as f:
         return _tg_post("sendDocument", chat_id,
             data={"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"},
-            files={"document": (Path(path).name, f, "application/pdf")},
+            files={"document": (Path(path).name, f, mime)},
         )
 
 
@@ -589,9 +698,9 @@ def deliver(n: dict):
     elif "pdf_url" in n:
         pdf_urls = [n["pdf_url"]]
         print(f"    PDF URL from API content")
-    elif re.search(r'\.pdf(\?|$)', link, re.I):
+    elif re.search(r'\.(pdf|jpg|jpeg|png|gif|webp)(\?|$)', link, re.I):
         pdf_urls = [link]
-        print(f"    Direct PDF link detected — skipping page fetch")
+        print(f"    Direct attachment link detected — skipping page fetch")
     else:
         candidates = get_pdf_urls(link)
         print(f"    {len(candidates)} PDF candidate(s) found on page")
