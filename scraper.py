@@ -35,6 +35,16 @@ NOTIF_URL        = f"{BASE_URL}/all-notifications/"
 SEEN_FILE        = "seen.json"
 HEARTBEAT_FILE   = "heartbeat.json"
 
+DDE_BASE_URL = "https://dde.pondiuni.edu.in"
+
+# DDE (Directorate of Distance Education) listing pages to scrape.
+# Each entry is (url, category_label).
+DDE_LIST_PAGES = [
+    (f"{DDE_BASE_URL}/notification-all-announcements-list/",      "DDE Announcements 📢"),
+    (f"{DDE_BASE_URL}/notification-all-exam-notification-list/",  "DDE Exam Notifications 📋"),
+    (f"{DDE_BASE_URL}/exam-results-2/",                           "DDE Exam Results 📊"),
+]
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -132,6 +142,14 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for section_url, category in EXTRA_SECTIONS:
         extras = _scrape_section_links(section_url, category)
         for item in extras:
+            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+                results.append(item)
+                existing_links.add(item["link"])
+
+    # Scrape DDE (Directorate of Distance Education) listing pages.
+    for dde_url, category in DDE_LIST_PAGES:
+        dde_items = _scrape_dde_list_page(dde_url, category)
+        for item in dde_items:
             if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
@@ -329,6 +347,112 @@ def _scrape_section_links(section_url: str, category: str) -> list[dict]:
         })
 
     print(f"  [Section] {len(results)} link(s) found under {section_url}")
+    return results
+
+
+def _abs_dde(href: str) -> str:
+    """Convert a relative URL to absolute using DDE_BASE_URL."""
+    href = href.strip()
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return DDE_BASE_URL + href
+    return DDE_BASE_URL + "/" + href
+
+
+def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
+    """Scrape a DDE listing page for notification links.
+
+    Handles both table-based layouts (rows with title/date cells) and
+    generic link-list layouts common on WordPress-based university sites.
+    Only links hosted on dde.pondiuni.edu.in are returned.
+    """
+    _MIN_TITLE_LEN = 10
+    _SKIP_HREF = ("javascript:", "mailto:", "facebook.com", "twitter.com", "instagram.com")
+
+    try:
+        r = requests.get(page_url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  Failed to fetch DDE page {page_url}: {e}")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    # Strip navigation / decorative regions
+    for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
+        tag.decompose()
+    for tag in soup.find_all(True, {"class": re.compile(
+            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+        tag.decompose()
+
+    content = (
+        soup.find("main")
+        or soup.find("div", {"class": re.compile(
+            r"entry[._-]content|post[._-]content|content[._-]area|main[._-]content", re.I)})
+        or soup
+    )
+
+    results: list[dict] = []
+    seen_links: set = set()
+
+    # ── 1. Table rows (title cell + optional issued-by + date cells) ──
+    for row in content.find_all("tr"):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        link_tag = cells[0].find("a", href=True)
+        if not link_tag:
+            continue
+        href  = _abs_dde(link_tag["href"])
+        title = link_tag.get_text(strip=True)
+        if not title or len(title) < _MIN_TITLE_LEN:
+            continue
+        if href in seen_links:
+            continue
+        if any(skip in href for skip in _SKIP_HREF):
+            continue
+        if "dde.pondiuni.edu.in" not in href:
+            continue
+        issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+        date_str  = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+        seen_links.add(href)
+        results.append({
+            "id":        href,
+            "title":     title,
+            "link":      href,
+            "category":  category,
+            "issued_by": issued_by,
+            "date":      date_str,
+        })
+
+    # ── 2. Generic link scan (for list/card layouts) ──────────────
+    for a in content.find_all("a", href=True):
+        href  = _abs_dde(a["href"])
+        title = a.get_text(strip=True)
+        if not title or len(title) < _MIN_TITLE_LEN:
+            continue
+        if href in seen_links:
+            continue
+        if any(skip in href for skip in _SKIP_HREF):
+            continue
+        if "dde.pondiuni.edu.in" not in href:
+            continue
+        # Skip links that are just the listing page itself
+        if href.rstrip("/") == page_url.rstrip("/"):
+            continue
+        seen_links.add(href)
+        results.append({
+            "id":        href,
+            "title":     title,
+            "link":      href,
+            "category":  category,
+            "issued_by": "",
+            "date":      "",
+        })
+
+    print(f"  [DDE] {len(results)} notification(s) found on {page_url}")
     return results
 
 # ─────────────────────────────────────────────────────────────
@@ -759,11 +883,20 @@ def alert_admin(text: str):
 # ─────────────────────────────────────────────────────────────
 def build_caption(n: dict, summary: str = "") -> str:
     summary_block = f"\n🤖 <b>AI Summary:</b>\n{summary}\n" if summary else ""
+    category = n.get("category", "General")
+    # Identify DDE notifications by checking against the known DDE category labels
+    _dde_categories = {cat for _, cat in DDE_LIST_PAGES}
+    is_dde = category in _dde_categories
+    institution = (
+        "🏛 <b>Pondicherry University — DDE</b>\n<i>(Distance Education)</i>"
+        if is_dde else
+        "🏛 <b>Pondicherry University</b>"
+    )
     return (
         f"🔔 <b>NEW NOTIFICATION</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏛 <b>Pondicherry University</b>\n\n"
-        f"📁 <b>Category :</b> {n.get('category', 'General')}\n"
+        f"{institution}\n\n"
+        f"📁 <b>Category :</b> {category}\n"
         f"📄 <b>Title    :</b> {n['title']}\n"
         f"🏢 <b>Issued by:</b> {n.get('issued_by') or '—'}\n"
         f"📅 <b>Date     :</b> {n.get('date') or '—'}"
