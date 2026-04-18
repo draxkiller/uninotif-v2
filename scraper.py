@@ -64,12 +64,12 @@ TAB_SLUGS = {
     "Tenders":    ("Tenders",             "📝"),
 }
 
-# Extra pages to scrape for admission and distance-education notifications.
+# Extra pages to scrape for section-specific notifications.
 # These are WordPress section pages whose child links are treated as notifications.
-EXTRA_SECTIONS = [
-    (f"{BASE_URL}/admission/",                          "Admission 🏫"),
-    (f"{BASE_URL}/directorate-of-distance-education/", "Distance Education 📚"),
-]
+# Note: /admission/ and /directorate-of-distance-education/ were removed — both
+# return 404.  Admission posts are covered by the WP REST API; distance-education
+# notifications are covered by DDE_LIST_PAGES above.
+EXTRA_SECTIONS: list[tuple[str, str]] = []
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
@@ -413,7 +413,7 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
             continue
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        if "dde.pondiuni.edu.in" not in href:
+        if "pondiuni.edu.in" not in href:
             continue
         issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
         date_str  = cells[2].get_text(strip=True) if len(cells) > 2 else ""
@@ -437,7 +437,7 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
             continue
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        if "dde.pondiuni.edu.in" not in href:
+        if "pondiuni.edu.in" not in href:
             continue
         # Skip links that are just the listing page itself
         if href.rstrip("/") == page_url.rstrip("/"):
@@ -708,7 +708,7 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
                     if direct_url and direct_url != pdf_url:
                         print(f"    Viewer page detected — retrying with primary → {direct_url[:80]}")
                         return download_pdf(direct_url, _retry=False)
-                print(f"    Not a valid PDF or image (bad magic bytes) — skipping")
+                print("    Not a valid PDF or image (bad magic bytes) — skipping")
                 return None
 
         # Rename to the correct extension now that we know the file type
@@ -922,10 +922,10 @@ def deliver(n: dict):
             print(f"    Primary PDF → {pdf_urls[0][:80]}")
     elif "pdf_url" in n:
         pdf_urls = [n["pdf_url"]]
-        print(f"    PDF URL from API content")
+        print("    PDF URL from API content")
     elif re.search(r'\.(pdf|jpg|jpeg|png|gif|webp)(\?|$)', link, re.I):
         pdf_urls = [link]
-        print(f"    Direct attachment link detected — skipping page fetch")
+        print("    Direct attachment link detected — skipping page fetch")
     else:
         candidates = get_pdf_urls(link)
         print(f"    {len(candidates)} PDF candidate(s) found on page")
@@ -1175,7 +1175,7 @@ def main():
             print(f"\n  ❌ {err_msg}")
             alert_admin(err_msg)
             return
-        print(f"  ⚡ First run — seeding seen.json without sending alerts.")
+        print("  ⚡ First run — seeding seen.json without sending alerts.")
 
     new_count = 0
     errors    = 0
