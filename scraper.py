@@ -64,12 +64,12 @@ TAB_SLUGS = {
     "Tenders":    ("Tenders",             "📝"),
 }
 
-# Extra pages to scrape for admission and distance-education notifications.
+# Extra pages to scrape for section-specific notifications.
 # These are WordPress section pages whose child links are treated as notifications.
-EXTRA_SECTIONS = [
-    (f"{BASE_URL}/admission/",                          "Admission 🏫"),
-    (f"{BASE_URL}/directorate-of-distance-education/", "Distance Education 📚"),
-]
+# Note: /admission/ and /directorate-of-distance-education/ were removed — both
+# return 404.  Admission posts are covered by the WP REST API; distance-education
+# notifications are covered by DDE_LIST_PAGES above.
+EXTRA_SECTIONS: list[tuple[str, str]] = []
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
@@ -413,7 +413,7 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
             continue
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        if "dde.pondiuni.edu.in" not in href:
+        if "pondiuni.edu.in" not in href:
             continue
         issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
         date_str  = cells[2].get_text(strip=True) if len(cells) > 2 else ""
@@ -437,7 +437,7 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
             continue
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        if "dde.pondiuni.edu.in" not in href:
+        if "pondiuni.edu.in" not in href:
             continue
         # Skip links that are just the listing page itself
         if href.rstrip("/") == page_url.rstrip("/"):
