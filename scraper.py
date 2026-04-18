@@ -708,7 +708,7 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
                     if direct_url and direct_url != pdf_url:
                         print(f"    Viewer page detected — retrying with primary → {direct_url[:80]}")
                         return download_pdf(direct_url, _retry=False)
-                print(f"    Not a valid PDF or image (bad magic bytes) — skipping")
+                print("    Not a valid PDF or image (bad magic bytes) — skipping")
                 return None
 
         # Rename to the correct extension now that we know the file type
@@ -922,10 +922,10 @@ def deliver(n: dict):
             print(f"    Primary PDF → {pdf_urls[0][:80]}")
     elif "pdf_url" in n:
         pdf_urls = [n["pdf_url"]]
-        print(f"    PDF URL from API content")
+        print("    PDF URL from API content")
     elif re.search(r'\.(pdf|jpg|jpeg|png|gif|webp)(\?|$)', link, re.I):
         pdf_urls = [link]
-        print(f"    Direct attachment link detected — skipping page fetch")
+        print("    Direct attachment link detected — skipping page fetch")
     else:
         candidates = get_pdf_urls(link)
         print(f"    {len(candidates)} PDF candidate(s) found on page")
@@ -1175,7 +1175,7 @@ def main():
             print(f"\n  ❌ {err_msg}")
             alert_admin(err_msg)
             return
-        print(f"  ⚡ First run — seeding seen.json without sending alerts.")
+        print("  ⚡ First run — seeding seen.json without sending alerts.")
 
     new_count = 0
     errors    = 0
