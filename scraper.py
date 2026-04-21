@@ -885,12 +885,18 @@ def alert_admin(text: str):
 # ─────────────────────────────────────────────────────────────
 # MESSAGE FORMATTING
 # ─────────────────────────────────────────────────────────────
+_DDE_TITLE_RE = re.compile(r'^DDE\s*[–—-]', re.IGNORECASE)
+
 def build_caption(n: dict, summary: str = "") -> str:
     summary_block = f"\n🤖 <b>AI Summary:</b>\n{summary}\n" if summary else ""
     category = n.get("category", "General")
-    # Identify DDE notifications by checking against the known DDE category labels
+    # Identify DDE notifications by checking against the known DDE category labels,
+    # or by title prefix (e.g. "DDE – …") for items that arrive via the main API.
     _dde_categories = {cat for _, cat in DDE_LIST_PAGES}
-    is_dde = category in _dde_categories
+    is_dde = category in _dde_categories or bool(_DDE_TITLE_RE.match(n.get("title", "")))
+    if is_dde and category not in _dde_categories:
+        # Assign a sensible DDE category label instead of the generic "General 🔔"
+        category = "DDE Notification 📢"
     institution = (
         "🏛 <b>Pondicherry University — DDE</b>\n<i>(Distance Education)</i>"
         if is_dde else
