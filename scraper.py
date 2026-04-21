@@ -10,7 +10,8 @@ Pondicherry University — Telegram Notification Bot  v2
 ✦ AI summary via Google Gemini Flash (optional)
 """
 
-import html, mimetypes, os, re, json, time, hashlib, requests
+import html
+import mimetypes, os, re, json, time, hashlib, requests
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
