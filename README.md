@@ -111,8 +111,8 @@ If you want to wipe `seen.json` and re-catalogue from scratch (without sending a
 requests
 beautifulsoup4
 lxml
-google-generativeai   # AI summaries (optional feature)
-pdfplumber            # PDF text extraction for AI summaries
+google-genai        # AI summaries (optional feature)
+pdfplumber          # PDF text extraction for AI summaries
 ```
 
 Install locally with:
