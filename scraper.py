@@ -10,6 +10,7 @@ Pondicherry University — Telegram Notification Bot  v2
 ✦ AI summary via Google Gemini Flash (optional)
 """
 
+import html
 import mimetypes, os, re, json, time, hashlib, requests
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -776,7 +777,10 @@ def get_ai_summary(text: str) -> str:
             f"{truncated}"
         )
         response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        summary  = response.text.strip()
+        summary  = (response.text or "").strip()
+        if not summary:
+            print("    AI summary: empty response from model")
+            return ""
         print(f"    AI summary generated ({len(summary)} chars)")
         return summary
     except Exception as e:
@@ -897,7 +901,7 @@ def build_caption(n: dict, summary: str = "") -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{institution}\n\n"
         f"📁 <b>Category :</b> {category}\n"
-        f"📄 <b>Title    :</b> {n['title']}\n"
+        f"📄 <b>Title    :</b> <code>{html.escape(n['title'])}</code>\n"
         f"🏢 <b>Issued by:</b> {n.get('issued_by') or '—'}\n"
         f"📅 <b>Date     :</b> {n.get('date') or '—'}"
         f"{summary_block}\n"
