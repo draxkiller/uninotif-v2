@@ -502,22 +502,35 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
     - <li>-based list / card layouts.
     - Generic anchor scan as a final fallback.
 
-    Links are accepted if they are hosted on one of these trusted domains:
+    Links are accepted only from NTA-specific trusted domains:
       nta.nic.in, exams.nta.nic.in, cdnbbsr.s3waas.gov.in (NTA's CDN),
-      any .nic.in / .gov.in domain, or any .ntaexam.ac.in domain.
-    The listing page URL itself is always skipped to avoid self-referential entries.
+      or any .ntaexam.ac.in domain.
+    The listing page URL (and its fragment variants) are always skipped.
+    Generic navigation titles (e.g. "Read More", "Contact US") are also excluded.
     """
-    _MIN_TITLE_LEN = 8
+    _MIN_TITLE_LEN = 15
     _SKIP_HREF = ("javascript:", "mailto:", "facebook.com", "twitter.com",
-                  "instagram.com", "youtube.com", "linkedin.com")
-    # Domains considered "on-site" for NTA / government portals
+                  "instagram.com", "youtube.com", "linkedin.com", "x.com")
+    # Restrict to NTA-specific domains only — broad .gov.in / .nic.in would
+    # pick up unrelated ministry/department navigation links.
     _VALID_DOMAINS = ("nta.nic.in", "exams.nta.nic.in", "cdnbbsr.s3waas.gov.in",
-                      ".nic.in", ".gov.in", ".ntaexam.ac.in")
+                      ".ntaexam.ac.in")
+    # Generic UI / navigation phrases that are never real notifications.
+    _GENERIC_TITLES = frozenset({
+        "read more", "click here", "download", "view more", "more details",
+        "contact us", "contact", "home", "about us", "about", "back", "next",
+        "previous", "submit", "apply now", "apply", "register", "login",
+        "sign in", "sign up", "know more", "view all", "see all",
+    })
 
     def _is_valid_href(href: str) -> bool:
         if any(skip in href for skip in _SKIP_HREF):
             return False
         return any(d in href for d in _VALID_DOMAINS)
+
+    def _is_fragment_of_page(href: str, pg_url: str = page_url) -> bool:
+        """Return True if href is just a fragment/anchor variant of page_url."""
+        return href.split("#")[0].rstrip("/") == pg_url.rstrip("/")
 
     try:
         r = requests.get(page_url, headers=HEADERS, timeout=30)
@@ -557,11 +570,13 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
         title = link_tag.get_text(strip=True)
         if not title or len(title) < _MIN_TITLE_LEN:
             continue
+        if title.lower().strip() in _GENERIC_TITLES:
+            continue
         if href in seen_links:
             continue
         if not _is_valid_href(href):
             continue
-        if href.rstrip("/") == page_url.rstrip("/"):
+        if _is_fragment_of_page(href):
             continue
         issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
         date_str  = cells[2].get_text(strip=True) if len(cells) > 2 else ""
@@ -584,11 +599,13 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
         title = link_tag.get_text(strip=True) or li.get_text(strip=True)
         if not title or len(title) < _MIN_TITLE_LEN:
             continue
+        if title.lower().strip() in _GENERIC_TITLES:
+            continue
         if href in seen_links:
             continue
         if not _is_valid_href(href):
             continue
-        if href.rstrip("/") == page_url.rstrip("/"):
+        if _is_fragment_of_page(href):
             continue
         seen_links.add(href)
         results.append({
@@ -606,11 +623,13 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
         title = a.get_text(strip=True)
         if not title or len(title) < _MIN_TITLE_LEN:
             continue
+        if title.lower().strip() in _GENERIC_TITLES:
+            continue
         if href in seen_links:
             continue
         if not _is_valid_href(href):
             continue
-        if href.rstrip("/") == page_url.rstrip("/"):
+        if _is_fragment_of_page(href):
             continue
         seen_links.add(href)
         results.append({

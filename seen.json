@@ -1757,12 +1757,6 @@
     "category": "General 🔔",
     "notified": "2026-04-22T11:08:52.624981+00:00"
   },
-  "https://x.com/share?url=https://exams.nta.nic.in/cuet-pg/&via=TWITTER_HANDLE&text=COMMON+UNIVERSITY+ENTRANCE+TEST+%28PG%29": {
-    "title": "Share on X (formerly Twitter)",
-    "date": "",
-    "category": "CUET-PG Notice 📋",
-    "notified": "2026-04-22T11:09:00.655007+00:00"
-  },
   "https://exams.nta.nic.in/answer-key-challenge-for-cuetpg-2026/": {
     "title": "Answer Key Challenge for CUET(PG) – 2026",
     "date": "",
@@ -1792,18 +1786,6 @@
     "date": "",
     "category": "CUET-PG Notice 📋",
     "notified": "2026-04-22T11:09:28.063162+00:00"
-  },
-  "https://exams.nta.nic.in/cuet-pg/#whats-new": {
-    "title": "Public Notices",
-    "date": "",
-    "category": "CUET-PG Notice 📋",
-    "notified": "2026-04-22T11:09:33.545355+00:00"
-  },
-  "https://exams.nta.nic.in/cuet-pg/#forms": {
-    "title": "News & Events",
-    "date": "",
-    "category": "CUET-PG Notice 📋",
-    "notified": "2026-04-22T11:10:16.681943+00:00"
   },
   "https://cdnbbsr.s3waas.gov.in/s388a839f2f6f1427879fc33ee4acf4f66/uploads/2026/04/20260413645031166.pdf": {
     "title": "Advisory on provisional answer key(s) and challenges process for CUET (PG) 2026 Examination – reg.",
@@ -1870,23 +1852,5 @@
     "date": "",
     "category": "CUET-PG Notice 📋",
     "notified": "2026-04-22T11:11:20.071295+00:00"
-  },
-  "https://exams.nta.nic.in/cuet-pg/nta-helpdesk/": {
-    "title": "Contact US",
-    "date": "",
-    "category": "CUET-PG Notice 📋",
-    "notified": "2026-04-22T11:11:25.580283+00:00"
-  },
-  "https://www.education.gov.in/en": {
-    "title": "Ministry of Education",
-    "date": "",
-    "category": "CUET-PG Notice 📋",
-    "notified": "2026-04-22T11:11:31.169565+00:00"
-  },
-  "https://exams.nta.nic.in/about-department/cuet-pg-introduction/": {
-    "title": "Read More",
-    "date": "",
-    "category": "CUET-PG Notice 📋",
-    "notified": "2026-04-22T11:11:36.265613+00:00"
   }
 }
