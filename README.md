@@ -7,6 +7,8 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 ## ✦ Features
 
 - **7 categories monitored** — Circulars, News & Announcements, Ph.D Notifications, Events, Admission, Careers, Tenders
+- **DDE notifications** — Announcements, Exam Notifications, and Exam Results from the Directorate of Distance Education (`dde.pondiuni.edu.in`)
+- **CUET-PG / NTA notifications** — Notices, Instructions, Date Sheet, Admit Cards, Answer Keys, and Results from [https://exams.nta.nic.in/cuet-pg/](https://exams.nta.nic.in/cuet-pg/)
 - **PDF delivery** — attaches the notification's PDF directly to the Telegram message
 - **AI summary** — optional 2–3 sentence summary of each notification powered by Google Gemini Flash (set `GEMINI_API_KEY` secret to enable)
 - **Multi-recipient** — broadcast to multiple user chats
