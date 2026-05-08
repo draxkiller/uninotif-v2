@@ -27,7 +27,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 ├── seen.json                         # Tracks notified IDs (auto-updated by bot)
 ├── heartbeat.json                    # Tracks daily heartbeat (auto-updated by bot)
 ├── requirements.txt                  # Python dependencies
-└── .github/workflows/notify.yml      # Legacy GitHub Actions scheduler (recommended to delete after Azure migration)
+└── .github/workflows/notify.yml      # Legacy GitHub Actions scheduler (manually delete after Azure deployment is confirmed healthy)
 ```
 
 ---

@@ -1384,13 +1384,26 @@ def _is_within_active_window_ist(now_ist: datetime | None = None) -> bool:
 def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> int:
     if now_ist is None:
         now_ist = datetime.now(IST_TZ)
-    next_start = now_ist.replace(
-        hour=ACTIVE_WINDOW_START_HOUR_IST, minute=0, second=0, microsecond=0
-    )
-    if now_ist.hour >= ACTIVE_WINDOW_END_HOUR_IST:
+    if now_ist.hour < ACTIVE_WINDOW_START_HOUR_IST:
+        next_start = now_ist.replace(
+            hour=ACTIVE_WINDOW_START_HOUR_IST, minute=0, second=0, microsecond=0
+        )
+    elif now_ist.hour >= ACTIVE_WINDOW_END_HOUR_IST:
+        next_start = now_ist.replace(
+            hour=ACTIVE_WINDOW_START_HOUR_IST, minute=0, second=0, microsecond=0
+        )
         next_start += timedelta(days=1)
+    else:
+        return 0
     seconds = int((next_start - now_ist).total_seconds())
     return max(seconds, 60)
+
+def _sleep_interruptible(total_seconds: int, step_seconds: int = 5):
+    remaining = max(0, int(total_seconds))
+    while remaining > 0 and not _SHUTDOWN_REQUESTED:
+        chunk = min(step_seconds, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
 
 
 def run_notification_check_once():
@@ -1516,7 +1529,7 @@ def main():
                 ist_time=now_ist.isoformat(),
                 sleep_seconds=sleep_seconds,
             )
-            time.sleep(sleep_seconds)
+            _sleep_interruptible(sleep_seconds)
             continue
 
         try:
@@ -1543,7 +1556,7 @@ def main():
                 )
 
         log_event("info", "next_cycle_sleep", cycle=cycle, sleep_seconds=CHECK_INTERVAL_SECONDS)
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        _sleep_interruptible(CHECK_INTERVAL_SECONDS)
     log_event("info", "service_stopped")
 
 
