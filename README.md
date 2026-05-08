@@ -1,6 +1,6 @@
 # 🔔 Pondicherry University Notification Bot v2
 
-Automatically monitors [Pondicherry University's notification page](https://www.pondiuni.edu.in/all-notifications/) and sends Telegram alerts with PDF attachments for every new notification — designed to run as a continuous Python process on Azure App Service Linux.
+Automatically monitors [Pondicherry University's notification page](https://www.pondiuni.edu.in/all-notifications/) and sends Telegram alerts with PDF attachments for every new notification — designed to run from a scheduled GitHub Actions workflow.
 
 ---
 
@@ -16,7 +16,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 - **Daily heartbeat** — fires approximately once per day (first run after 20+ hours since the last heartbeat) so you know the bot is alive
 - **Smart deduplication** — `seen.json` committed to repo after every run; re-sends are prevented even if the job crashes mid-run
 - **Auto-pruning** — entries older than 180 days are removed from `seen.json` automatically to keep the file compact; seeded (baseline) entries are never pruned
-- **Azure-ready runtime** — continuous process loop, no external scheduler required
+- **GitHub Actions scheduler** — runs every 5 minutes and checks only during active IST hours
 
 ---
 
@@ -27,7 +27,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 ├── seen.json                         # Tracks notified IDs (auto-updated by bot)
 ├── heartbeat.json                    # Tracks daily heartbeat (auto-updated by bot)
 ├── requirements.txt                  # Python dependencies
-└── .github/workflows/notify.yml      # Legacy GitHub Actions scheduler (manually delete after Azure deployment is confirmed healthy)
+└── .github/workflows/main_uninotif-v2.yml  # GitHub Actions workflow (scheduled + manual run)
 ```
 
 ---
@@ -51,7 +51,7 @@ Create a **private** repository on GitHub and push these files.
 
 ### 4. Configure environment variables
 
-Set these environment variables in Azure App Service (**Configuration → Application settings**):
+Add these as repository secrets in **GitHub → Settings → Secrets and variables → Actions**:
 
 | Secret name | Value |
 |---|---|
@@ -63,19 +63,11 @@ Set these environment variables in Azure App Service (**Configuration → Applic
 
 > 💡 **AI summaries** are silently skipped when `GEMINI_API_KEY` is not set, so the bot works without it. To disable summaries while keeping the key, set `ENABLE_AI_SUMMARY=false`.
 
-### 5. Set Azure startup command
+### 5. Run the workflow
 
-Set startup command to:
+The workflow runs automatically every 5 minutes and can also be triggered manually from the Actions tab.
 
-```bash
-python scraper.py
-```
-
-### 6. Start the app
-
-Start/restart the App Service. The bot process will begin running continuously.
-
-On first run the bot will:
+On first successful run the bot will:
 - Scrape all current notifications and save them to `seen.json` (without sending alerts)
 - Send you an activation message confirming how many notifications were catalogued
 - From that point on, only **new** notifications trigger alerts
@@ -84,12 +76,11 @@ On first run the bot will:
 
 ## 🕐 Schedule
 
-The bot runs in an internal loop:
+The GitHub workflow is scheduled every **5 minutes**. Each run performs one check and:
 
-- checks every **5 minutes**
-- uses **Asia/Kolkata (IST)** timezone
+- uses **Asia/Kolkata (IST)** timezone rules in code
 - performs scraping only between **09:00 and 21:00 IST**
-- sleeps outside that time window (no scraping calls)
+- exits without scraping outside that time window
 
 ---
 
@@ -130,7 +121,7 @@ python scraper.py
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "catalogued 0 notifications" on first run | Scraper couldn't reach the site | Check App Service logs for HTTP errors; restart after a few minutes |
+| "catalogued 0 notifications" on first run | Scraper couldn't reach the site | Check GitHub Actions logs for HTTP errors; rerun the workflow after a few minutes |
 | Old notifications being re-sent | `seen.json` was reset/lost | Ensure persistent app storage and keep `seen.json` intact |
 | Same PDF attached to every notification | Site nav/footer PDF was being matched | Fixed in v2 — bot now searches only the post content area |
 | Bot appears idle at night | Outside active scraping window | Expected; bot sleeps outside 09:00–21:00 IST |
