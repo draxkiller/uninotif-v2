@@ -1,6 +1,6 @@
 # 🔔 Pondicherry University Notification Bot v2
 
-Automatically monitors [Pondicherry University's notification page](https://www.pondiuni.edu.in/all-notifications/) and sends Telegram alerts with PDF attachments for every new notification — powered by GitHub Actions, zero hosting cost.
+Automatically monitors [Pondicherry University's notification page](https://www.pondiuni.edu.in/all-notifications/) and sends Telegram alerts with PDF attachments for every new notification — designed to run as a continuous Python process on Azure App Service Linux.
 
 ---
 
@@ -16,7 +16,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 - **Daily heartbeat** — fires approximately once per day (first run after 20+ hours since the last heartbeat) so you know the bot is alive
 - **Smart deduplication** — `seen.json` committed to repo after every run; re-sends are prevented even if the job crashes mid-run
 - **Auto-pruning** — entries older than 180 days are removed from `seen.json` automatically to keep the file compact; seeded (baseline) entries are never pruned
-- **Runs free** — GitHub Actions scheduled workflow, no server needed
+- **Azure-ready runtime** — continuous process loop, no external scheduler required
 
 ---
 
@@ -27,9 +27,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 ├── seen.json                         # Tracks notified IDs (auto-updated by bot)
 ├── heartbeat.json                    # Tracks daily heartbeat (auto-updated by bot)
 ├── requirements.txt                  # Python dependencies
-└── .github/
-    └── workflows/
-        └── notify.yml                # GitHub Actions workflow (runs every 5 min)
+└── .github/workflows/notify.yml      # Legacy GitHub Actions scheduler (manually delete after Azure deployment is confirmed healthy)
 ```
 
 ---
@@ -51,9 +49,9 @@ Create a **private** repository on GitHub and push these files.
 - **Personal chat**: Message [@userinfobot](https://t.me/userinfobot) — it replies with your chat ID
 - Add each Telegram user chat ID you want to notify (comma-separated in `TELEGRAM_CHAT_IDS`)
 
-### 4. Add GitHub Secrets
+### 4. Configure environment variables
 
-Go to your repo → **Settings → Secrets and variables → Actions → New repository secret**
+Set these environment variables in Azure App Service (**Configuration → Application settings**):
 
 | Secret name | Value |
 |---|---|
@@ -63,17 +61,19 @@ Go to your repo → **Settings → Secrets and variables → Actions → New rep
 
 > ⚠️ The **first** chat ID is treated as the admin — it receives error alerts and the daily heartbeat. Additional IDs receive notifications only.
 
-> 💡 **AI summaries** are silently skipped when `GEMINI_API_KEY` is not set, so the bot works without it. To disable summaries while keeping the key, add a repository variable `ENABLE_AI_SUMMARY = false` (Settings → Secrets and variables → Actions → Variables).
+> 💡 **AI summaries** are silently skipped when `GEMINI_API_KEY` is not set, so the bot works without it. To disable summaries while keeping the key, set `ENABLE_AI_SUMMARY=false`.
 
-### 5. Enable Actions & set permissions
+### 5. Set Azure startup command
 
-1. Go to **Settings → Actions → General**
-2. Under *Workflow permissions*, select **Read and write permissions**
-3. Click Save
+Set startup command to:
 
-### 6. Trigger first run
+```bash
+python scraper.py
+```
 
-Go to **Actions → 🔔 PU Notification Bot v2 → Run workflow**.
+### 6. Start the app
+
+Start/restart the App Service. The bot process will begin running continuously.
 
 On first run the bot will:
 - Scrape all current notifications and save them to `seen.json` (without sending alerts)
@@ -84,26 +84,18 @@ On first run the bot will:
 
 ## 🕐 Schedule
 
-The workflow runs **every 5 minutes** (`*/5 * * * *`) — the minimum interval supported by GitHub Actions.
+The bot runs in an internal loop:
 
-To change the interval, edit `notify.yml`:
-
-```yaml
-- cron: '*/5 * * * *'          # every 5 min (GitHub Actions minimum)
-# - cron: '3,18,33,48 * * * *' # every 15 min (lower resource usage)
-```
-
-> **Note:** GitHub Actions free tier does not guarantee exact timing. Scheduled runs can be delayed 5–30 minutes during peak hours.
+- checks every **5 minutes**
+- uses **Asia/Kolkata (IST)** timezone
+- performs scraping only between **09:00 and 21:00 IST**
+- sleeps outside that time window (no scraping calls)
 
 ---
 
 ## 🔄 Reseed / Reset
 
-If you want to wipe `seen.json` and re-catalogue from scratch (without sending alerts):
-
-1. Go to **Actions → 🔔 PU Notification Bot v2 → Run workflow**
-2. Check **"Clear seen.json and re-seed"**
-3. Click **Run workflow**
+If you want to wipe `seen.json` and re-catalogue from scratch (without sending alerts), replace `seen.json` with `{}` and restart the app.
 
 ---
 
@@ -138,11 +130,10 @@ python scraper.py
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "catalogued 0 notifications" on first run | Scraper couldn't reach the site | Check Actions log for HTTP error; re-run after a few minutes |
-| Old notifications being re-sent | `seen.json` push failed (concurrent runs) | Check Actions log for push errors; the bot retries 4 times automatically |
+| "catalogued 0 notifications" on first run | Scraper couldn't reach the site | Check App Service logs for HTTP errors; restart after a few minutes |
+| Old notifications being re-sent | `seen.json` was reset/lost | Ensure persistent app storage and keep `seen.json` intact |
 | Same PDF attached to every notification | Site nav/footer PDF was being matched | Fixed in v2 — bot now searches only the post content area |
-| Workflow runs late / not at all | GitHub Actions free-tier queue delay | Normal behaviour; consider reducing to 1 repo if running v1 + v2 in parallel |
-| Bot stopped sending (no errors) | GitHub disables scheduled workflows after **60 days of repo inactivity** | Push any commit to the repo to re-enable, or manually trigger a run |
+| Bot appears idle at night | Outside active scraping window | Expected; bot sleeps outside 09:00–21:00 IST |
 
 ---
 

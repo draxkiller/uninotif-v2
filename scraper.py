@@ -6,24 +6,28 @@ Pondicherry University — Telegram Notification Bot  v2
 ✦ Multi-recipient (users)
 ✦ Error alerts to admin only
 ✦ Daily heartbeat
-✦ 5-minute checks via GitHub Actions
+✦ Continuous 5-minute checks (Azure App Service Linux friendly)
 ✦ AI summary via Google Gemini Flash (optional)
 """
 
 import html
+import logging
 import mimetypes, os, re, json, time, hashlib, requests
+import signal
+import traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────────────────────
-# CONFIG  (all values come from GitHub Secrets)
+# CONFIG  (all values come from environment variables)
 # ─────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
 if not re.match(r'^\d+:[\w-]{35,}$', TELEGRAM_TOKEN):
     raise ValueError(
         "TELEGRAM_BOT_TOKEN looks invalid — expected format: <bot_id>:<35+ char token>. "
-        "Check your GitHub secret."
+        "Check your environment variable."
     )
 # Comma-separated user chat IDs  e.g.  "123456789,987654321"
 # First ID = admin
@@ -35,6 +39,12 @@ BASE_URL         = "https://www.pondiuni.edu.in"
 NOTIF_URL        = f"{BASE_URL}/all-notifications/"
 SEEN_FILE        = "seen.json"
 HEARTBEAT_FILE   = "heartbeat.json"
+CHECK_INTERVAL_SECONDS = 5 * 60
+IST_TZ = ZoneInfo("Asia/Kolkata")
+ACTIVE_WINDOW_START_HOUR_IST = 9
+ACTIVE_WINDOW_END_HOUR_IST = 21
+MINIMUM_SLEEP_SECONDS = 60
+SHUTDOWN_CHECK_INTERVAL_SECONDS = 5
 
 DDE_BASE_URL = "https://dde.pondiuni.edu.in"
 
@@ -89,6 +99,22 @@ TAB_SLUGS = {
 EXTRA_SECTIONS: list[tuple[str, str]] = []
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+LOG = logging.getLogger("uninotif")
+if not LOG.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    LOG.addHandler(_handler)
+LOG.setLevel(logging.INFO)
+
+def log_event(level: str, event: str, **fields):
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level.upper(),
+        "event": event,
+    }
+    payload.update(fields)
+    LOG.log(getattr(logging, level.upper(), logging.INFO), json.dumps(payload, ensure_ascii=False))
 
 # ─────────────────────────────────────────────────────────────
 # AI SUMMARY CONFIG  (optional — set GEMINI_API_KEY secret)
@@ -1204,15 +1230,13 @@ def deliver(n: dict):
 # ─────────────────────────────────────────────────────────────
 # DAILY HEARTBEAT
 # ─────────────────────────────────────────────────────────────
-HEARTBEAT_INTERVAL_HOURS = 20   # send approximately once per day (20-hour minimum interval to handle scheduling variations)
+HEARTBEAT_INTERVAL_HOURS = 20   # send approximately once per day
 
 def maybe_send_heartbeat(seen: dict):
     """Send a daily 'bot is alive' message to admin.
 
     Fires on the first run after HEARTBEAT_INTERVAL_HOURS have elapsed since
-    the last heartbeat (or on the very first run ever).  This approach is
-    immune to GitHub Actions scheduler gaps that could cause a fixed time-
-    window check to be skipped indefinitely.
+    the last heartbeat (or on the very first run ever).
     """
     now = datetime.now(timezone.utc)
     hb  = load_json(HEARTBEAT_FILE)
@@ -1344,15 +1368,57 @@ def _resend_last(n: int, seen: dict, recent_notifications: list[dict]):
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
-def main():
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'='*55}")
-    print(f"  PU Notification Bot v2  —  {ts}")
-    print(f"  Recipients: {len(CHAT_IDS)} chat(s)")
-    print(f"{'='*55}")
+_SHUTDOWN_REQUESTED = False
+
+
+def _request_shutdown(signum, _frame):
+    global _SHUTDOWN_REQUESTED
+    _SHUTDOWN_REQUESTED = True
+    log_event("info", "shutdown_requested", signal=signum)
+
+
+def _is_within_active_window_ist(now_ist: datetime | None = None) -> bool:
+    if now_ist is None:
+        now_ist = datetime.now(IST_TZ)
+    return ACTIVE_WINDOW_START_HOUR_IST <= now_ist.hour < ACTIVE_WINDOW_END_HOUR_IST
+
+
+def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> int:
+    if now_ist is None:
+        now_ist = datetime.now(IST_TZ)
+    if now_ist.hour < ACTIVE_WINDOW_START_HOUR_IST:
+        next_start = now_ist.replace(
+            hour=ACTIVE_WINDOW_START_HOUR_IST, minute=0, second=0, microsecond=0
+        )
+    elif now_ist.hour >= ACTIVE_WINDOW_END_HOUR_IST:
+        next_start = now_ist.replace(
+            hour=ACTIVE_WINDOW_START_HOUR_IST, minute=0, second=0, microsecond=0
+        )
+        next_start += timedelta(days=1)
+    else:
+        raise ValueError("_seconds_until_next_active_window_ist must be called outside active hours")
+    seconds = int((next_start - now_ist).total_seconds())
+    return max(seconds, MINIMUM_SLEEP_SECONDS)
+
+def _sleep_interruptible(total_seconds: int, step_seconds: int = SHUTDOWN_CHECK_INTERVAL_SECONDS):
+    remaining = max(0, int(total_seconds))
+    while remaining > 0 and not _SHUTDOWN_REQUESTED:
+        chunk = min(step_seconds, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+
+
+def run_notification_check_once():
+    now_ist = datetime.now(IST_TZ)
+    log_event(
+        "info",
+        "notification_check_started",
+        ist_time=now_ist.isoformat(),
+        recipients=len(CHAT_IDS),
+    )
 
     if not CHAT_IDS:
-        print("ERROR: No TELEGRAM_CHAT_IDS configured.")
+        log_event("error", "missing_chat_ids", message="No TELEGRAM_CHAT_IDS configured")
         return
 
     seen         = load_json(SEEN_FILE)
@@ -1442,8 +1508,58 @@ def main():
         _resend_last(RESEND_LAST, seen, notifications)
 
 
-if __name__ == "__main__":
-    main()
+def main():
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+    log_event(
+        "info",
+        "service_started",
+        timezone="Asia/Kolkata",
+        check_interval_seconds=CHECK_INTERVAL_SECONDS,
+        active_window_ist="09:00-21:00",
+    )
+    cycle = 0
+    while not _SHUTDOWN_REQUESTED:
+        cycle += 1
+        now_ist = datetime.now(IST_TZ)
+        if not _is_within_active_window_ist(now_ist):
+            sleep_seconds = _seconds_until_next_active_window_ist(now_ist)
+            log_event(
+                "info",
+                "outside_active_window_sleep",
+                cycle=cycle,
+                ist_time=now_ist.isoformat(),
+                sleep_seconds=sleep_seconds,
+            )
+            _sleep_interruptible(sleep_seconds)
+            continue
+
+        try:
+            run_notification_check_once()
+        except Exception as e:
+            log_event(
+                "error",
+                "notification_check_crashed",
+                cycle=cycle,
+                error=str(e),
+                traceback=traceback.format_exc(),
+            )
+            try:
+                alert_admin(
+                    f"Error in notification check cycle {cycle} at {now_ist.isoformat()}:\n\n{e}"
+                )
+            except Exception as alert_error:
+                log_event(
+                    "error",
+                    "admin_alert_failed",
+                    cycle=cycle,
+                    error=str(alert_error),
+                    traceback=traceback.format_exc(),
+                )
+
+        log_event("info", "next_cycle_sleep", cycle=cycle, sleep_seconds=CHECK_INTERVAL_SECONDS)
+        _sleep_interruptible(CHECK_INTERVAL_SECONDS)
+    log_event("info", "service_stopped")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1531,5 +1647,9 @@ def _run_tests():
     sys.exit(0 if failed == 0 else 1)
 
 
-if len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "--test":
-    _run_tests()
+if __name__ == "__main__":
+    _argv = __import__("sys").argv
+    if len(_argv) > 1 and _argv[1] == "--test":
+        _run_tests()
+    else:
+        main()
