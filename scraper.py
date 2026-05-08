@@ -39,8 +39,16 @@ ADMIN_CHAT_ID    = CHAT_IDS[0] if CHAT_IDS else ""
 
 BASE_URL         = "https://www.pondiuni.edu.in"
 NOTIF_URL        = f"{BASE_URL}/all-notifications/"
+def _resolve_db_path(raw_path: str) -> str:
+    p = Path(raw_path or "uninotif.db")
+    # Prevent relative path traversal while keeping absolute custom paths supported.
+    if not p.is_absolute() and ".." in p.parts:
+        p = Path("uninotif.db")
+    return str(p)
+
+
 # SQLite database path (Azure App Service persistent storage recommended).
-DB_FILE          = os.environ.get("SQLITE_DB_PATH", "uninotif.db")
+DB_FILE          = _resolve_db_path(os.environ.get("SQLITE_DB_PATH", "uninotif.db"))
 CHECK_INTERVAL_SECONDS = 5 * 60
 IST_TZ = ZoneInfo("Asia/Kolkata")
 ACTIVE_WINDOW_START_HOUR_IST = 9
@@ -131,6 +139,8 @@ AI_SUMMARY_ENABLED = bool(GEMINI_API_KEY) and ENABLE_AI_SUMMARY
 
 # Number of most-recently-notified entries to re-send (0 = disabled, max 10)
 RESEND_LAST = min(10, max(0, int(os.environ.get("RESEND_LAST", "0") or "0")))
+LATEST_MIN = 1
+LATEST_MAX = 10
 
 _gemini_client = None   # lazily initialised
 
@@ -369,7 +379,7 @@ def get_latest_sent_notifications(limit: int = 5) -> list[sqlite3.Row]:
             ORDER BY id DESC
             LIMIT ?
             """,
-            (max(1, min(10, limit)),),
+            (max(LATEST_MIN, min(LATEST_MAX, limit)),),
         ).fetchall()
 
 
@@ -1489,7 +1499,7 @@ def _handle_admin_command(text: str):
     elif command == "/latest":
         limit = 5
         if len(parts) > 1 and parts[1].isdigit():
-            limit = min(10, max(1, int(parts[1])))
+            limit = min(LATEST_MAX, max(LATEST_MIN, int(parts[1])))
         tg_text(ADMIN_CHAT_ID, _latest_message(limit=limit))
     elif command == "/addsite":
         if len(parts) < 2:
@@ -1497,7 +1507,8 @@ def _handle_admin_command(text: str):
             return
         url = parts[1].strip()
         category = parts[2].strip() if len(parts) > 2 else "Custom Site 🔎"
-        if not (url.startswith("http://") or url.startswith("https://")):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
             tg_text(ADMIN_CHAT_ID, "Please provide a valid http/https URL.")
             return
         if add_monitored_site(url, category, source_type="custom"):
