@@ -1648,8 +1648,10 @@ def _run_tests():
 
 
 if __name__ == "__main__":
-    _argv = __import__("sys").argv
-    if len(_argv) > 1 and _argv[1] == "--test":
+    _argv = __import__("sys").argv[1:]
+    if "--test" in _argv:
         _run_tests()
+    elif "--once" in _argv:
+        run_notification_check_once()
     else:
         main()
