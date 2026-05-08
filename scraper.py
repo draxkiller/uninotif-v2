@@ -713,7 +713,8 @@ def _scrape_generic_site(page_url: str, category: str) -> list[dict]:
         href = a["href"].strip()
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        url = href if href.startswith("http://") or href.startswith("https://") else requests.compat.urljoin(page_url, href)
+        href_parsed = urlparse(href)
+        url = href if href_parsed.scheme in ("http", "https") else requests.compat.urljoin(page_url, href)
         if site_host and site_host not in urlparse(url).netloc:
             continue
         title = a.get_text(strip=True)
@@ -1284,19 +1285,20 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
 # ─────────────────────────────────────────────────────────────
 # AI SUMMARY
 # ─────────────────────────────────────────────────────────────
-_AI_MAX_CHARS = 4500   # slightly larger context improves summary quality for longer PDF notices
+_AI_MAX_CHARS = int(os.environ.get("AI_MAX_CHARS", "4500") or "4500")
+_PDF_SUMMARY_PAGE_LIMIT = int(os.environ.get("PDF_SUMMARY_PAGE_LIMIT", "8") or "8")
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract plain text from a downloaded PDF using pdfplumber.
 
     Returns an empty string if extraction fails or pdfplumber is unavailable.
-    Only the first 8 pages are read to balance extraction quality and latency.
+    Only the first N pages are read to balance extraction quality and latency.
     """
     try:
         import pdfplumber  # noqa: PLC0415
         text_parts: list[str] = []
         with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages[:8]:
+            for page in pdf.pages[:_PDF_SUMMARY_PAGE_LIMIT]:
                 page_text = page.extract_text()
                 if page_text:
                     text_parts.append(page_text)

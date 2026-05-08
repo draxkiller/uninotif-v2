@@ -26,7 +26,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 
 ```
 ├── scraper.py                        # Main bot script
-├── uninotif.db                       # SQLite database (seen IDs, monitored sites, stats, history)
+├── uninotif.db                       # Runtime SQLite database (created on startup; not committed)
 ├── requirements.txt                  # Python dependencies
 └── .github/workflows/notify.yml      # Legacy GitHub Actions scheduler (manually delete after Azure deployment is confirmed healthy)
 ```
