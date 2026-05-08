@@ -13,6 +13,7 @@ Pondicherry University — Telegram Notification Bot  v2
 import html
 import logging
 import mimetypes, os, re, json, time, hashlib, requests
+import traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -1488,13 +1489,16 @@ def main():
         check_interval_seconds=CHECK_INTERVAL_SECONDS,
         active_window_ist="09:00-21:00",
     )
+    cycle = 0
     while True:
+        cycle += 1
         now_ist = datetime.now(IST_TZ)
         if not _is_within_active_window_ist(now_ist):
             sleep_seconds = _seconds_until_next_active_window_ist(now_ist)
             log_event(
                 "info",
                 "outside_active_window_sleep",
+                cycle=cycle,
                 ist_time=now_ist.isoformat(),
                 sleep_seconds=sleep_seconds,
             )
@@ -1504,13 +1508,25 @@ def main():
         try:
             run_notification_check_once()
         except Exception as e:
-            log_event("error", "notification_check_crashed", error=str(e))
+            log_event(
+                "error",
+                "notification_check_crashed",
+                cycle=cycle,
+                error=str(e),
+                traceback=traceback.format_exc(),
+            )
             try:
                 alert_admin(f"Fatal cycle error:\n\n{e}")
             except Exception as alert_error:
-                log_event("error", "admin_alert_failed", error=str(alert_error))
+                log_event(
+                    "error",
+                    "admin_alert_failed",
+                    cycle=cycle,
+                    error=str(alert_error),
+                    traceback=traceback.format_exc(),
+                )
 
-        log_event("info", "next_cycle_sleep", sleep_seconds=CHECK_INTERVAL_SECONDS)
+        log_event("info", "next_cycle_sleep", cycle=cycle, sleep_seconds=CHECK_INTERVAL_SECONDS)
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 
