@@ -43,6 +43,8 @@ CHECK_INTERVAL_SECONDS = 5 * 60
 IST_TZ = ZoneInfo("Asia/Kolkata")
 ACTIVE_WINDOW_START_HOUR_IST = 9
 ACTIVE_WINDOW_END_HOUR_IST = 21
+MINIMUM_SLEEP_SECONDS = 60
+SHUTDOWN_CHECK_INTERVAL_SECONDS = 5
 
 DDE_BASE_URL = "https://dde.pondiuni.edu.in"
 
@@ -1394,11 +1396,11 @@ def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> in
         )
         next_start += timedelta(days=1)
     else:
-        return 60
+        return MINIMUM_SLEEP_SECONDS
     seconds = int((next_start - now_ist).total_seconds())
-    return max(seconds, 60)
+    return max(seconds, MINIMUM_SLEEP_SECONDS)
 
-def _sleep_interruptible(total_seconds: int, step_seconds: int = 5):
+def _sleep_interruptible(total_seconds: int, step_seconds: int = SHUTDOWN_CHECK_INTERVAL_SECONDS):
     remaining = max(0, int(total_seconds))
     while remaining > 0 and not _SHUTDOWN_REQUESTED:
         chunk = min(step_seconds, remaining)
