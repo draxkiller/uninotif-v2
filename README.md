@@ -14,10 +14,8 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 - **Multi-recipient** — broadcast to multiple user chats
 - **Admin-only error alerts** — failures go to the first chat ID only
 - **Daily heartbeat** — fires approximately once per day (first run after 20+ hours since the last heartbeat) so you know the bot is alive
-- **SQLite persistence** — seen notifications, monitored sites, bot state, and stats are stored in `uninotif.db`
-- **Auto-pruning** — entries older than 180 days are removed from SQLite automatically to keep the database compact; seeded (baseline) entries are never pruned
-- **Telegram admin commands** — `/status`, `/sites`, `/addsite`, `/removesite`, `/latest`
-- **Persistent scrape history** — every scrape cycle writes success/failure counts and run stats to SQLite
+- **Smart deduplication** — `seen.json` committed to repo after every run; re-sends are prevented even if the job crashes mid-run
+- **Auto-pruning** — entries older than 180 days are removed from `seen.json` automatically to keep the file compact; seeded (baseline) entries are never pruned
 - **Azure-ready runtime** — continuous process loop, no external scheduler required
 
 ---
@@ -26,7 +24,8 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 
 ```
 ├── scraper.py                        # Main bot script
-├── uninotif.db                       # Runtime SQLite database (created on startup; not committed)
+├── seen.json                         # Tracks notified IDs (auto-updated by bot)
+├── heartbeat.json                    # Tracks daily heartbeat (auto-updated by bot)
 ├── requirements.txt                  # Python dependencies
 └── .github/workflows/notify.yml      # Legacy GitHub Actions scheduler (manually delete after Azure deployment is confirmed healthy)
 ```
@@ -59,8 +58,6 @@ Set these environment variables in Azure App Service (**Configuration → Applic
 | `TELEGRAM_BOT_TOKEN` | Your bot token from BotFather |
 | `TELEGRAM_CHAT_IDS` | Comma-separated user chat IDs, e.g. `123456789,987654321` |
 | `GEMINI_API_KEY` | *(Optional)* Google Gemini API key — enables AI summaries |
-| `SQLITE_DB_PATH` | *(Optional)* SQLite DB file path (default: `uninotif.db`) |
-| `RUN_24X7` | *(Optional)* `true` (default) for continuous 24/7 scraping |
 
 > ⚠️ The **first** chat ID is treated as the admin — it receives error alerts and the daily heartbeat. Additional IDs receive notifications only.
 
@@ -79,7 +76,7 @@ python scraper.py
 Start/restart the App Service. The bot process will begin running continuously.
 
 On first run the bot will:
-- Scrape all current notifications and seed them into the SQLite database (without sending alerts)
+- Scrape all current notifications and save them to `seen.json` (without sending alerts)
 - Send you an activation message confirming how many notifications were catalogued
 - From that point on, only **new** notifications trigger alerts
 
@@ -91,20 +88,14 @@ The bot runs in an internal loop:
 
 - checks every **5 minutes**
 - uses **Asia/Kolkata (IST)** timezone
-- performs scraping every **5 minutes, 24/7 by default**
-- optional legacy window mode via `RUN_24X7=false` (09:00–21:00 IST)
+- performs scraping only between **09:00 and 21:00 IST**
+- sleeps outside that time window (no scraping calls)
 
 ---
 
-## 🤖 Admin Commands
+## 🔄 Reseed / Reset
 
-Admin commands are accepted from the first chat ID in `TELEGRAM_CHAT_IDS`:
-
-- `/status` — service metrics (`last scrape`, `total sites`, `failed sites`, `notifications sent`)
-- `/sites` — list monitored sites from SQLite
-- `/addsite <url> [category]` — add/enable a custom monitored site
-- `/removesite <site_id_or_url>` — disable a monitored site
-- `/latest [count]` — show latest sent notifications (default 5, max 10)
+If you want to wipe `seen.json` and re-catalogue from scratch (without sending alerts), replace `seen.json` with `{}` and restart the app.
 
 ---
 
@@ -140,9 +131,9 @@ python scraper.py
 | Symptom | Cause | Fix |
 |---|---|---|
 | "catalogued 0 notifications" on first run | Scraper couldn't reach the site | Check App Service logs for HTTP errors; restart after a few minutes |
-| Old notifications being re-sent | SQLite DB was reset/lost | Ensure persistent App Service storage and keep `uninotif.db` intact |
+| Old notifications being re-sent | `seen.json` was reset/lost | Ensure persistent app storage and keep `seen.json` intact |
 | Same PDF attached to every notification | Site nav/footer PDF was being matched | Fixed in v2 — bot now searches only the post content area |
-| Bot appears idle at night | `RUN_24X7=false` set | Remove/flip that setting to run 24/7 |
+| Bot appears idle at night | Outside active scraping window | Expected; bot sleeps outside 09:00–21:00 IST |
 
 ---
 
@@ -151,7 +142,7 @@ python scraper.py
 - The bot uses the **WordPress REST API** (`/wp-json/wp/v2/university_news`) as its primary source, falling back to HTML scraping if the API is unavailable.
 - PDFs over 49 MB are skipped (Telegram's file size limit is 50 MB).
 - The bot sends at most one Telegram message per notification per run; if PDF download fails, it falls back to sending a text message with the notification link.
-- Seen entries older than 180 days are pruned automatically on each run; seeded baseline entries are never pruned.
+- `seen.json` entries older than 180 days are pruned automatically on each run; entries from the initial seeding baseline are never pruned.
 
 ---
 
