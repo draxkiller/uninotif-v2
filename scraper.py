@@ -47,7 +47,7 @@ ACTIVE_WINDOW_START_HOUR_IST = 9
 ACTIVE_WINDOW_END_HOUR_IST = 21
 MINIMUM_SLEEP_SECONDS = 60
 SHUTDOWN_CHECK_INTERVAL_SECONDS = 5
-# RUN_24X7 is enabled unless explicitly set to false/0/no.
+# RUN_24X7 defaults to enabled when unset; only false/0/no (case-insensitive) disables it.
 RUN_24X7 = os.environ.get("RUN_24X7", "true").lower() not in ("false", "0", "no")
 
 DDE_BASE_URL = "https://dde.pondiuni.edu.in"
@@ -307,12 +307,11 @@ def prune_seen_db():
 
 def get_monitored_sites(enabled_only: bool = True) -> list[sqlite3.Row]:
     query = "SELECT id, url, category, source_type, enabled FROM monitored_sites"
-    params: tuple = ()
     if enabled_only:
         query += " WHERE enabled = 1"
     query += " ORDER BY id ASC"
     with _db_connect() as conn:
-        return conn.execute(query, params).fetchall()
+        return conn.execute(query).fetchall()
 
 
 def add_monitored_site(url: str, category: str, source_type: str = "custom") -> bool:
@@ -332,6 +331,9 @@ def add_monitored_site(url: str, category: str, source_type: str = "custom") -> 
 
 
 def remove_monitored_site(identifier: str) -> bool:
+    identifier = identifier.strip()
+    if not identifier:
+        return False
     with _db_connect() as conn:
         if identifier.isdigit():
             cur = conn.execute("UPDATE monitored_sites SET enabled = 0 WHERE id = ?", (int(identifier),))
@@ -1487,7 +1489,7 @@ def _handle_admin_command(text: str):
     elif command == "/latest":
         limit = 5
         if len(parts) > 1 and parts[1].isdigit():
-            limit = int(parts[1])
+            limit = min(10, max(1, int(parts[1])))
         tg_text(ADMIN_CHAT_ID, _latest_message(limit=limit))
     elif command == "/addsite":
         if len(parts) < 2:
@@ -1517,9 +1519,10 @@ def process_admin_commands():
     if not ADMIN_CHAT_ID:
         return
     offset_raw = db_get_state("telegram_update_offset", "0")
-    if offset_raw and not offset_raw.isdigit():
+    is_valid_offset = offset_raw.isdigit()
+    if offset_raw and not is_valid_offset:
         log_event("warning", "invalid_telegram_update_offset", raw_value=offset_raw)
-    offset = int(offset_raw) if offset_raw.isdigit() else 0
+    offset = int(offset_raw) if is_valid_offset else 0
     try:
         r = requests.get(
             f"{TG_API}/getUpdates",
@@ -1690,7 +1693,7 @@ def deliver(n: dict):
 # ─────────────────────────────────────────────────────────────
 HEARTBEAT_INTERVAL_HOURS = 20   # send approximately once per day
 
-def maybe_send_heartbeat(seen: dict):
+def maybe_send_heartbeat(seen_count: int):
     """Send a daily 'bot is alive' message to admin.
 
     Fires on the first run after HEARTBEAT_INTERVAL_HOURS have elapsed since
@@ -1708,7 +1711,7 @@ def maybe_send_heartbeat(seen: dict):
         except Exception:
             pass  # unparseable timestamp → treat as "never sent"
 
-    total = len(seen) if isinstance(seen, dict) else int(seen)
+    total = int(seen_count)
     msg = (
         f"💚 <b>Bot is running fine</b>\n\n"
         f"🕗 Daily check — {now.strftime('%d %b %Y %H:%M')} UTC\n"
@@ -1923,7 +1926,7 @@ def run_notification_check_once():
         )
     else:
         print(f"\n  ✅ Done. {new_count} new | {errors} errors.")
-        maybe_send_heartbeat(seen)
+        maybe_send_heartbeat(len(seen))
 
     finalize_scrape_history(
         history_id,
