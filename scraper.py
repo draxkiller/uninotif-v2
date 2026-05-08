@@ -13,10 +13,12 @@ Pondicherry University — Telegram Notification Bot  v2
 import html
 import logging
 import mimetypes, os, re, json, time, hashlib, requests
+import sqlite3
 import signal
 import traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 
@@ -37,14 +39,14 @@ ADMIN_CHAT_ID    = CHAT_IDS[0] if CHAT_IDS else ""
 
 BASE_URL         = "https://www.pondiuni.edu.in"
 NOTIF_URL        = f"{BASE_URL}/all-notifications/"
-SEEN_FILE        = "seen.json"
-HEARTBEAT_FILE   = "heartbeat.json"
+DB_FILE          = os.environ.get("SQLITE_DB_PATH", "uninotif.db")
 CHECK_INTERVAL_SECONDS = 5 * 60
 IST_TZ = ZoneInfo("Asia/Kolkata")
 ACTIVE_WINDOW_START_HOUR_IST = 9
 ACTIVE_WINDOW_END_HOUR_IST = 21
 MINIMUM_SLEEP_SECONDS = 60
 SHUTDOWN_CHECK_INTERVAL_SECONDS = 5
+RUN_24X7 = os.environ.get("RUN_24X7", "true").lower() not in ("false", "0", "no")
 
 DDE_BASE_URL = "https://dde.pondiuni.edu.in"
 
@@ -115,6 +117,7 @@ def log_event(level: str, event: str, **fields):
     }
     payload.update(fields)
     LOG.log(getattr(logging, level.upper(), logging.INFO), json.dumps(payload, ensure_ascii=False))
+    _append_event_log(payload)
 
 # ─────────────────────────────────────────────────────────────
 # AI SUMMARY CONFIG  (optional — set GEMINI_API_KEY secret)
@@ -137,16 +140,270 @@ def _get_gemini_client():
     return _gemini_client
 
 # ─────────────────────────────────────────────────────────────
-# SEEN / HEARTBEAT STORE
+# SQLITE STORE
 # ─────────────────────────────────────────────────────────────
-def load_json(path: str) -> dict:
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+DEFAULT_MONITORED_SITES = [
+    (NOTIF_URL, "Pondicherry University Notifications 🔔", "pu_main"),
+    *[(url, category, "dde") for url, category in DDE_LIST_PAGES],
+    *[(url, category, "cuet_pg") for url, category in CUET_PG_LIST_PAGES],
+    *[(url, category, "section") for url, category in EXTRA_SECTIONS],
+]
 
-def save_json(path: str, data: dict):
-    Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def _db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_database():
+    with _db_connect() as conn:
+        conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS seen_notifications (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                date TEXT,
+                category TEXT,
+                link TEXT,
+                notified_at TEXT NOT NULL,
+                is_seeded INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS monitored_sites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                category TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'custom',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS scrape_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                total_sites INTEGER NOT NULL DEFAULT 0,
+                failed_sites INTEGER NOT NULL DEFAULT 0,
+                notifications_found INTEGER NOT NULL DEFAULT 0,
+                notifications_sent INTEGER NOT NULL DEFAULT 0,
+                errors INTEGER NOT NULL DEFAULT 0,
+                notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS service_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                notifications_sent INTEGER NOT NULL DEFAULT 0,
+                last_scrape_at TEXT,
+                last_failed_sites INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS service_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS event_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                level TEXT NOT NULL,
+                event TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sent_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                notif_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                category TEXT,
+                link TEXT,
+                sent_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("INSERT OR IGNORE INTO service_stats(id) VALUES (1)")
+        for url, category, source_type in DEFAULT_MONITORED_SITES:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO monitored_sites(url, category, source_type, enabled, created_at)
+                VALUES (?, ?, ?, 1, ?)
+                """,
+                (url, category, source_type, datetime.now(timezone.utc).isoformat()),
+            )
+
+
+def _append_event_log(payload: dict):
+    try:
+        with _db_connect() as conn:
+            conn.execute(
+                "INSERT INTO event_logs(timestamp, level, event, payload) VALUES (?, ?, ?, ?)",
+                (
+                    payload.get("timestamp", datetime.now(timezone.utc).isoformat()),
+                    payload.get("level", "INFO"),
+                    payload.get("event", "unknown"),
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+    except Exception:
+        pass
+
+
+def db_get_state(key: str, default: str = "") -> str:
+    with _db_connect() as conn:
+        row = conn.execute("SELECT value FROM service_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def db_set_state(key: str, value: str):
+    with _db_connect() as conn:
+        conn.execute(
+            "INSERT INTO service_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def load_seen_map() -> dict:
+    with _db_connect() as conn:
+        rows = conn.execute(
+            "SELECT id, title, date, category, link, notified_at, is_seeded FROM seen_notifications"
+        ).fetchall()
+    return {
+        row["id"]: {
+            "title": row["title"],
+            "date": row["date"] or "",
+            "category": row["category"] or "",
+            "link": row["link"] or "",
+            "notified": "seeded" if row["is_seeded"] else row["notified_at"],
+        }
+        for row in rows
+    }
+
+
+def mark_seen(nid: str, title: str, date: str, category: str, link: str, seeded: bool):
+    ts = datetime.now(timezone.utc).isoformat()
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO seen_notifications(id, title, date, category, link, notified_at, is_seeded)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                date = excluded.date,
+                category = excluded.category,
+                link = excluded.link
+            """,
+            (nid, title, date, category, link, ts if not seeded else "seeded", 1 if seeded else 0),
+        )
+
+
+def prune_seen_db():
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=PRUNE_DAYS)).isoformat()
+    with _db_connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM seen_notifications WHERE is_seeded = 0 AND notified_at < ?",
+            (cutoff,),
+        )
+    if cur.rowcount:
+        print(f"  🗑  Pruned {cur.rowcount} old entries from SQLite (>{PRUNE_DAYS} days)")
+
+
+def get_monitored_sites(enabled_only: bool = True) -> list[sqlite3.Row]:
+    query = "SELECT id, url, category, source_type, enabled FROM monitored_sites"
+    params: tuple = ()
+    if enabled_only:
+        query += " WHERE enabled = 1"
+    query += " ORDER BY id ASC"
+    with _db_connect() as conn:
+        return conn.execute(query, params).fetchall()
+
+
+def add_monitored_site(url: str, category: str, source_type: str = "custom") -> bool:
+    try:
+        with _db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO monitored_sites(url, category, source_type, enabled, created_at)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(url) DO UPDATE SET category = excluded.category, enabled = 1
+                """,
+                (url, category, source_type, datetime.now(timezone.utc).isoformat()),
+            )
+        return True
+    except Exception:
+        return False
+
+
+def remove_monitored_site(identifier: str) -> bool:
+    with _db_connect() as conn:
+        if identifier.isdigit():
+            cur = conn.execute("UPDATE monitored_sites SET enabled = 0 WHERE id = ?", (int(identifier),))
+        else:
+            cur = conn.execute("UPDATE monitored_sites SET enabled = 0 WHERE url = ?", (identifier,))
+    return cur.rowcount > 0
+
+
+def record_sent_notification(n: dict):
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO sent_notifications(notif_id, title, category, link, sent_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                n["id"],
+                n.get("title", ""),
+                n.get("category", ""),
+                n.get("link", ""),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.execute("UPDATE service_stats SET notifications_sent = notifications_sent + 1 WHERE id = 1")
+
+
+def get_latest_sent_notifications(limit: int = 5) -> list[sqlite3.Row]:
+    with _db_connect() as conn:
+        return conn.execute(
+            """
+            SELECT notif_id, title, category, link, sent_at
+            FROM sent_notifications
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, min(10, limit)),),
+        ).fetchall()
+
+
+def create_scrape_history(total_sites: int) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with _db_connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO scrape_history(started_at, total_sites) VALUES (?, ?)",
+            (now, total_sites),
+        )
+        conn.execute(
+            "UPDATE service_stats SET last_scrape_at = ?, last_failed_sites = 0 WHERE id = 1",
+            (now,),
+        )
+        return int(cur.lastrowid)
+
+
+def finalize_scrape_history(
+    history_id: int,
+    failed_sites: int,
+    notifications_found: int,
+    notifications_sent: int,
+    errors: int,
+    notes: str = "",
+):
+    now = datetime.now(timezone.utc).isoformat()
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            UPDATE scrape_history
+            SET completed_at = ?, failed_sites = ?, notifications_found = ?, notifications_sent = ?, errors = ?, notes = ?
+            WHERE id = ?
+            """,
+            (now, failed_sites, notifications_found, notifications_sent, errors, notes, history_id),
+        )
+        conn.execute(
+            "UPDATE service_stats SET last_scrape_at = ?, last_failed_sites = ? WHERE id = 1",
+            (now, failed_sites),
+        )
 
 # ─────────────────────────────────────────────────────────────
 # HELPERS
@@ -172,40 +429,52 @@ def _fmt_wp_date(date_str: str) -> str:
         return date_str
 
 
-def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
-    results = _try_wp_rest_api(seen_ids)
-    if results is not None:
-        print(f"  [API]  {len(results)} notifications via WP REST API")
-    else:
-        results = _scrape_html()
-        print(f"  [HTML] {len(results)} notifications via HTML scrape")
+def _merge_results(results: list[dict], extras: list[dict], seen_ids: set, existing_links: set[str]):
+    for item in extras:
+        if item["id"] in seen_ids:
+            continue
+        if item["link"] in existing_links:
+            continue
+        results.append(item)
+        existing_links.add(item["link"])
 
-    # Also scrape admission and distance-education section pages.
-    existing_links = {r["link"] for r in results}
-    for section_url, category in EXTRA_SECTIONS:
-        extras = _scrape_section_links(section_url, category)
-        for item in extras:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
-                results.append(item)
-                existing_links.add(item["link"])
 
-    # Scrape DDE (Directorate of Distance Education) listing pages.
-    for dde_url, category in DDE_LIST_PAGES:
-        dde_items = _scrape_dde_list_page(dde_url, category)
-        for item in dde_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
-                results.append(item)
-                existing_links.add(item["link"])
+def fetch_all_notifications(seen_ids: set | None = None) -> tuple[list[dict], int, int]:
+    seen_ids = seen_ids or set()
+    sites = get_monitored_sites(enabled_only=True)
+    results: list[dict] = []
+    existing_links: set[str] = set()
+    failed_sites = 0
 
-    # Scrape CUET-PG (NTA) pages.
-    for cuet_url, category in CUET_PG_LIST_PAGES:
-        cuet_items = _scrape_cuet_pg_page(cuet_url, category)
-        for item in cuet_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
-                results.append(item)
-                existing_links.add(item["link"])
+    for site in sites:
+        try:
+            source_type = site["source_type"]
+            url = site["url"]
+            category = site["category"]
+            site_results: list[dict]
 
-    return results
+            if source_type == "pu_main":
+                site_results = _try_wp_rest_api(seen_ids)
+                if site_results is not None:
+                    print(f"  [API]  {len(site_results)} notifications via WP REST API")
+                else:
+                    site_results = _scrape_html()
+                    print(f"  [HTML] {len(site_results)} notifications via HTML scrape")
+            elif source_type == "dde":
+                site_results = _scrape_dde_list_page(url, category)
+            elif source_type == "cuet_pg":
+                site_results = _scrape_cuet_pg_page(url, category)
+            elif source_type == "section":
+                site_results = _scrape_section_links(url, category)
+            else:
+                site_results = _scrape_generic_site(url, category)
+            _merge_results(results, site_results, seen_ids, existing_links)
+        except Exception as e:
+            failed_sites += 1
+            log_event("error", "site_scrape_failed", site_id=site["id"], url=site["url"], error=str(e))
+            print(f"  Failed site scrape ({site['url']}): {e}")
+
+    return results, failed_sites, len(sites)
 
 
 def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
@@ -398,6 +667,54 @@ def _scrape_section_links(section_url: str, category: str) -> list[dict]:
         })
 
     print(f"  [Section] {len(results)} link(s) found under {section_url}")
+    return results
+
+
+def _scrape_generic_site(page_url: str, category: str) -> list[dict]:
+    """Scrape a generic site page and treat meaningful links as notifications."""
+    _MIN_TITLE_LEN = 12
+    _SKIP_HREF = ("javascript:", "mailto:", "#")
+    parsed = urlparse(page_url)
+    site_host = parsed.netloc
+
+    try:
+        r = requests.get(page_url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  Failed to fetch custom site {page_url}: {e}")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    for tag in soup.find_all(["script", "style"]):
+        tag.decompose()
+
+    results: list[dict] = []
+    seen_links: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if any(skip in href for skip in _SKIP_HREF):
+            continue
+        url = href if href.startswith("http://") or href.startswith("https://") else requests.compat.urljoin(page_url, href)
+        if site_host and site_host not in urlparse(url).netloc:
+            continue
+        title = a.get_text(strip=True)
+        if not title or len(title) < _MIN_TITLE_LEN:
+            continue
+        if url in seen_links:
+            continue
+        seen_links.add(url)
+        results.append(
+            {
+                "id": url,
+                "title": title,
+                "link": url,
+                "category": category,
+                "issued_by": "",
+                "date": "",
+            }
+        )
+
+    print(f"  [Custom] {len(results)} notification(s) found on {page_url}")
     return results
 
 
@@ -948,29 +1265,29 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
 # ─────────────────────────────────────────────────────────────
 # AI SUMMARY
 # ─────────────────────────────────────────────────────────────
-_AI_MAX_CHARS = 3000   # truncation limit fed to the model
+_AI_MAX_CHARS = 4500   # truncation limit fed to the model
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract plain text from a downloaded PDF using pdfplumber.
 
     Returns an empty string if extraction fails or pdfplumber is unavailable.
-    Only the first 5 pages are read to keep latency low.
+    Only the first 8 pages are read to keep latency low.
     """
     try:
         import pdfplumber  # noqa: PLC0415
         text_parts: list[str] = []
         with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages[:5]:
+            for page in pdf.pages[:8]:
                 page_text = page.extract_text()
                 if page_text:
                     text_parts.append(page_text)
-        return "\n".join(text_parts).strip()
+        return re.sub(r"\s+", " ", "\n".join(text_parts)).strip()
     except Exception as e:
         print(f"    PDF text extraction error: {e}")
         return ""
 
 
-def get_ai_summary(text: str) -> str:
+def get_ai_summary(text: str, *, title: str = "", category: str = "", date_str: str = "") -> str:
     """Return a 2–3 sentence AI summary of a notification's text content.
 
     Returns an empty string on any error so the caller can fall back gracefully.
@@ -985,9 +1302,13 @@ def get_ai_summary(text: str) -> str:
         client = _get_gemini_client()
         prompt = (
             "You are a helpful assistant for university students. "
-            "Summarize the following university notification in 2-3 concise sentences. "
-            "Focus on the key information (what, who, when, where). "
-            "Reply with the summary only, no preamble.\n\n"
+            "Summarize this university notification in exactly 2-3 concise sentences. "
+            "Use the text as authoritative source, prioritize dates/deadlines, eligibility, required actions, and where to read full details. "
+            "If key fields are missing, say so briefly. Reply with summary text only.\n\n"
+            f"Title: {title or 'N/A'}\n"
+            f"Category: {category or 'N/A'}\n"
+            f"Date: {date_str or 'N/A'}\n"
+            "Extracted notification text:\n"
             f"{truncated}"
         )
         response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
@@ -1096,6 +1417,128 @@ def alert_admin(text: str):
     if ADMIN_CHAT_ID:
         tg_text(ADMIN_CHAT_ID, f"⚠️ <b>Bot Alert</b>\n\n{text}")
 
+
+def _status_message() -> str:
+    with _db_connect() as conn:
+        stats = conn.execute(
+            "SELECT notifications_sent, last_scrape_at, last_failed_sites FROM service_stats WHERE id = 1"
+        ).fetchone()
+        site_row = conn.execute(
+            "SELECT COUNT(*) AS total FROM monitored_sites WHERE enabled = 1"
+        ).fetchone()
+    last_scrape = stats["last_scrape_at"] if stats and stats["last_scrape_at"] else "never"
+    failed_sites = stats["last_failed_sites"] if stats else 0
+    notifications_sent = stats["notifications_sent"] if stats else 0
+    total_sites = site_row["total"] if site_row else 0
+    return (
+        "📈 <b>Service Status</b>\n"
+        f"• Last scrape: <code>{html.escape(str(last_scrape))}</code>\n"
+        f"• Total monitored sites: <b>{total_sites}</b>\n"
+        f"• Failed sites (last run): <b>{failed_sites}</b>\n"
+        f"• Notifications sent: <b>{notifications_sent}</b>\n"
+        f"• Mode: <b>{'24/7' if RUN_24X7 else '09:00-21:00 IST'}</b>"
+    )
+
+
+def _sites_message() -> str:
+    sites = get_monitored_sites(enabled_only=False)
+    if not sites:
+        return "No sites configured."
+    lines = ["🌐 <b>Monitored Sites</b>"]
+    for s in sites[:50]:
+        state = "✅" if s["enabled"] else "⏸"
+        lines.append(
+            f"{state} <b>#{s['id']}</b> [{html.escape(s['source_type'])}] {html.escape(s['category'])}\n<code>{html.escape(s['url'])}</code>"
+        )
+    return "\n".join(lines)
+
+
+def _latest_message(limit: int = 5) -> str:
+    rows = get_latest_sent_notifications(limit=limit)
+    if not rows:
+        return "No sent notifications in history yet."
+    lines = [f"🕘 <b>Latest {len(rows)} notifications sent</b>"]
+    for row in rows:
+        lines.append(
+            f"• {html.escape(row['title'])}\n  {html.escape(row['sent_at'])}\n  <a href=\"{html.escape(row['link'])}\">Open ↗</a>"
+        )
+    return "\n".join(lines)
+
+
+def _handle_admin_command(text: str):
+    cmd_line = text.strip()
+    if not cmd_line.startswith("/"):
+        return
+    parts = cmd_line.split(maxsplit=2)
+    command = parts[0].lower()
+
+    if command == "/status":
+        tg_text(ADMIN_CHAT_ID, _status_message())
+    elif command == "/sites":
+        tg_text(ADMIN_CHAT_ID, _sites_message())
+    elif command == "/latest":
+        limit = 5
+        if len(parts) > 1 and parts[1].isdigit():
+            limit = int(parts[1])
+        tg_text(ADMIN_CHAT_ID, _latest_message(limit=limit))
+    elif command == "/addsite":
+        if len(parts) < 2:
+            tg_text(ADMIN_CHAT_ID, "Usage: <code>/addsite https://example.com Optional Category</code>")
+            return
+        url = parts[1].strip()
+        category = parts[2].strip() if len(parts) > 2 else "Custom Site 🔎"
+        if not (url.startswith("http://") or url.startswith("https://")):
+            tg_text(ADMIN_CHAT_ID, "Please provide a valid http/https URL.")
+            return
+        if add_monitored_site(url, category, source_type="custom"):
+            tg_text(ADMIN_CHAT_ID, f"✅ Added/updated monitored site:\n<code>{html.escape(url)}</code>")
+        else:
+            tg_text(ADMIN_CHAT_ID, "❌ Could not add site. Check URL and try again.")
+    elif command == "/removesite":
+        if len(parts) < 2:
+            tg_text(ADMIN_CHAT_ID, "Usage: <code>/removesite &lt;site_id_or_url&gt;</code>")
+            return
+        identifier = parts[1].strip()
+        if remove_monitored_site(identifier):
+            tg_text(ADMIN_CHAT_ID, f"✅ Disabled monitored site: <code>{html.escape(identifier)}</code>")
+        else:
+            tg_text(ADMIN_CHAT_ID, f"❌ Site not found: <code>{html.escape(identifier)}</code>")
+
+
+def process_admin_commands():
+    if not ADMIN_CHAT_ID:
+        return
+    offset_raw = db_get_state("telegram_update_offset", "0")
+    offset = int(offset_raw) if offset_raw.isdigit() else 0
+    try:
+        r = requests.get(
+            f"{TG_API}/getUpdates",
+            params={"timeout": 0, "offset": offset + 1, "allowed_updates": json.dumps(["message"])},
+            timeout=30,
+        )
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        log_event("error", "telegram_updates_failed", error=str(e))
+        return
+
+    if not payload.get("ok"):
+        return
+
+    max_update_id = offset
+    for update in payload.get("result", []):
+        update_id = int(update.get("update_id", 0))
+        max_update_id = max(max_update_id, update_id)
+        msg = update.get("message") or {}
+        chat_id = str((msg.get("chat") or {}).get("id", ""))
+        if chat_id != ADMIN_CHAT_ID:
+            continue
+        text = (msg.get("text") or "").strip()
+        if text.startswith("/"):
+            _handle_admin_command(text)
+    if max_update_id > offset:
+        db_set_state("telegram_update_offset", str(max_update_id))
+
 # ─────────────────────────────────────────────────────────────
 # MESSAGE FORMATTING
 # ─────────────────────────────────────────────────────────────
@@ -1189,7 +1632,12 @@ def deliver(n: dict):
                 if body_html:
                     raw_text = BeautifulSoup(body_html, "html.parser").get_text(separator=" ", strip=True)
             if raw_text:
-                summary = get_ai_summary(raw_text)
+                summary = get_ai_summary(
+                    raw_text,
+                    title=n.get("title", ""),
+                    category=n.get("category", ""),
+                    date_str=n.get("date", ""),
+                )
 
         caption = build_caption(n, summary)
 
@@ -1239,9 +1687,7 @@ def maybe_send_heartbeat(seen: dict):
     the last heartbeat (or on the very first run ever).
     """
     now = datetime.now(timezone.utc)
-    hb  = load_json(HEARTBEAT_FILE)
-
-    last_sent = hb.get("last_sent")
+    last_sent = db_get_state("heartbeat_last_sent")
     if last_sent:
         try:
             last_dt = datetime.fromisoformat(last_sent)
@@ -1252,7 +1698,7 @@ def maybe_send_heartbeat(seen: dict):
         except Exception:
             pass  # unparseable timestamp → treat as "never sent"
 
-    total = len(seen)
+    total = len(seen) if isinstance(seen, dict) else int(seen)
     msg = (
         f"💚 <b>Bot is running fine</b>\n\n"
         f"🕗 Daily check — {now.strftime('%d %b %Y %H:%M')} UTC\n"
@@ -1263,40 +1709,12 @@ def maybe_send_heartbeat(seen: dict):
     if ADMIN_CHAT_ID:
         tg_text(ADMIN_CHAT_ID, msg)
 
-    hb["last_sent"] = now.isoformat()
-    save_json(HEARTBEAT_FILE, hb)
+    db_set_state("heartbeat_last_sent", now.isoformat())
 
 # ─────────────────────────────────────────────────────────────
-# SEEN.JSON PRUNING
+# SEEN PRUNING
 # ─────────────────────────────────────────────────────────────
 PRUNE_DAYS = 180
-
-def prune_seen(seen: dict) -> dict:
-    """Remove notified entries older than PRUNE_DAYS to keep seen.json compact.
-    'seeded' entries (initial baseline) are never pruned.
-    """
-    cutoff  = datetime.now(timezone.utc) - timedelta(days=PRUNE_DAYS)
-    pruned  = {}
-    removed = 0
-    for nid, meta in seen.items():
-        notified = meta.get("notified", "")
-        if notified == "seeded":
-            pruned[nid] = meta
-            continue
-        try:
-            ts = datetime.fromisoformat(notified)
-            # Treat naive timestamps (stored before timezone support) as UTC
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts >= cutoff:
-                pruned[nid] = meta
-            else:
-                removed += 1
-        except Exception:
-            pruned[nid] = meta  # keep entries we can't parse
-    if removed:
-        print(f"  🗑  Pruned {removed} old entries from seen.json (>{PRUNE_DAYS} days)")
-    return pruned
 
 # ─────────────────────────────────────────────────────────────
 # RESEND HELPER
@@ -1329,7 +1747,7 @@ def _resend_last(n: int, seen: dict, recent_notifications: list[dict]):
             pass
 
     if not timed:
-        print("  No previously-notified entries found in seen.json — nothing to resend.")
+        print("  No previously-notified entries found in SQLite seen store — nothing to resend.")
         return
 
     timed.sort(key=lambda x: x[0], reverse=True)
@@ -1421,19 +1839,21 @@ def run_notification_check_once():
         log_event("error", "missing_chat_ids", message="No TELEGRAM_CHAT_IDS configured")
         return
 
-    seen         = load_json(SEEN_FILE)
-    # Determine first-run status BEFORE pruning: if the file already had entries
-    # but all of them expired, we should NOT re-seed and silence new notifications.
+    prune_seen_db()
+    seen = load_seen_map()
     is_first_run = len(seen) == 0
-    seen         = prune_seen(seen)
+    history_id = create_scrape_history(total_sites=len(get_monitored_sites(enabled_only=True)))
 
-    notifications = []
+    notifications: list[dict] = []
+    failed_sites = 0
+    sites_total = 0
     try:
-        notifications = fetch_all_notifications(seen_ids=set(seen.keys()))
+        notifications, failed_sites, sites_total = fetch_all_notifications(seen_ids=set(seen.keys()))
     except Exception as e:
         err_msg = f"Failed to fetch notifications: {e}"
         print(f"  ERROR: {err_msg}")
         alert_admin(err_msg)
+        finalize_scrape_history(history_id, failed_sites=1, notifications_found=0, notifications_sent=0, errors=1, notes=err_msg)
         return
 
     if is_first_run:
@@ -1445,8 +1865,9 @@ def run_notification_check_once():
             )
             print(f"\n  ❌ {err_msg}")
             alert_admin(err_msg)
+            finalize_scrape_history(history_id, failed_sites=failed_sites, notifications_found=0, notifications_sent=0, errors=1, notes=err_msg)
             return
-        print("  ⚡ First run — seeding seen.json without sending alerts.")
+        print("  ⚡ First run — seeding SQLite seen store without sending alerts.")
 
     new_count = 0
     errors    = 0
@@ -1457,28 +1878,20 @@ def run_notification_check_once():
             continue
 
         if is_first_run:
-            seen[nid] = {
-                "title":    n["title"],
-                "date":     n.get("date", ""),
-                "category": n.get("category", ""),
-                "notified": "seeded",
-            }
+            mark_seen(nid, n["title"], n.get("date", ""), n.get("category", ""), n.get("link", ""), seeded=True)
+            seen[nid] = {"title": n["title"], "date": n.get("date", ""), "category": n.get("category", ""), "notified": "seeded"}
             continue
 
         print(f"\n  🆕 {n['title'][:70]}")
         print(f"     {n.get('category','')}  |  {n.get('date','')}")
 
         # Mark as seen BEFORE delivering — prevents re-sends if job times out mid-run
-        seen[nid] = {
-            "title":    n["title"],
-            "date":     n.get("date", ""),
-            "category": n.get("category", ""),
-            "notified": datetime.now(timezone.utc).isoformat(),
-        }
-        save_json(SEEN_FILE, seen)   # persist immediately
+        mark_seen(nid, n["title"], n.get("date", ""), n.get("category", ""), n.get("link", ""), seeded=False)
+        seen[nid] = {"title": n["title"], "date": n.get("date", ""), "category": n.get("category", ""), "notified": datetime.now(timezone.utc).isoformat()}
 
         try:
             deliver(n)
+            record_sent_notification(n)
             new_count += 1
         except Exception as e:
             print(f"    ERROR delivering: {e}")
@@ -1487,13 +1900,12 @@ def run_notification_check_once():
 
         time.sleep(3)
 
-    save_json(SEEN_FILE, seen)
-
     if is_first_run:
-        print(f"\n  ✅ Seeded {len(seen)} existing notifications. Bot is now active!")
+        seeded_total = len(load_seen_map())
+        print(f"\n  ✅ Seeded {seeded_total} existing notifications. Bot is now active!")
         broadcast_text(
             f"✅ <b>PU Notification Bot v2 is now active!</b>\n\n"
-            f"I've catalogued <b>{len(seen)}</b> existing notifications.\n"
+            f"I've catalogued <b>{seeded_total}</b> existing notifications.\n"
             f"You'll get alerts for every <b>new</b> one from now on — with PDF! 🎉\n\n"
             f"👥 Broadcasting to <b>{len(CHAT_IDS)}</b> chat(s)\n"
             f"⏱ Checking every <b>5 minutes</b>\n\n"
@@ -1503,6 +1915,15 @@ def run_notification_check_once():
         print(f"\n  ✅ Done. {new_count} new | {errors} errors.")
         maybe_send_heartbeat(seen)
 
+    finalize_scrape_history(
+        history_id,
+        failed_sites=failed_sites,
+        notifications_found=len(notifications),
+        notifications_sent=new_count,
+        errors=errors,
+        notes=f"first_run={is_first_run}; sites={sites_total}",
+    )
+
     # ── Resend last N notifications ───────────────────────────
     if RESEND_LAST > 0 and not is_first_run:
         _resend_last(RESEND_LAST, seen, notifications)
@@ -1511,18 +1932,20 @@ def run_notification_check_once():
 def main():
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
+    init_database()
     log_event(
         "info",
         "service_started",
         timezone="Asia/Kolkata",
         check_interval_seconds=CHECK_INTERVAL_SECONDS,
-        active_window_ist="09:00-21:00",
+        active_window_ist="24x7" if RUN_24X7 else "09:00-21:00",
     )
     cycle = 0
     while not _SHUTDOWN_REQUESTED:
         cycle += 1
+        process_admin_commands()
         now_ist = datetime.now(IST_TZ)
-        if not _is_within_active_window_ist(now_ist):
+        if not RUN_24X7 and not _is_within_active_window_ist(now_ist):
             sleep_seconds = _seconds_until_next_active_window_ist(now_ist)
             log_event(
                 "info",
