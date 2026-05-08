@@ -13,6 +13,7 @@ Pondicherry University — Telegram Notification Bot  v2
 import html
 import logging
 import mimetypes, os, re, json, time, hashlib, requests
+import signal
 import traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -1365,13 +1366,24 @@ def _resend_last(n: int, seen: dict, recent_notifications: list[dict]):
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
+_SHUTDOWN_REQUESTED = False
+
+
+def _request_shutdown(signum, _frame):
+    global _SHUTDOWN_REQUESTED
+    _SHUTDOWN_REQUESTED = True
+    log_event("info", "shutdown_requested", signal=signum)
+
+
 def _is_within_active_window_ist(now_ist: datetime | None = None) -> bool:
-    now_ist = now_ist or datetime.now(IST_TZ)
+    if now_ist is None:
+        now_ist = datetime.now(IST_TZ)
     return ACTIVE_WINDOW_START_HOUR_IST <= now_ist.hour < ACTIVE_WINDOW_END_HOUR_IST
 
 
 def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> int:
-    now_ist = now_ist or datetime.now(IST_TZ)
+    if now_ist is None:
+        now_ist = datetime.now(IST_TZ)
     next_start = now_ist.replace(
         hour=ACTIVE_WINDOW_START_HOUR_IST, minute=0, second=0, microsecond=0
     )
@@ -1482,6 +1494,8 @@ def run_notification_check_once():
 
 
 def main():
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
     log_event(
         "info",
         "service_started",
@@ -1490,7 +1504,7 @@ def main():
         active_window_ist="09:00-21:00",
     )
     cycle = 0
-    while True:
+    while not _SHUTDOWN_REQUESTED:
         cycle += 1
         now_ist = datetime.now(IST_TZ)
         if not _is_within_active_window_ist(now_ist):
@@ -1516,7 +1530,9 @@ def main():
                 traceback=traceback.format_exc(),
             )
             try:
-                alert_admin(f"Fatal cycle error:\n\n{e}")
+                alert_admin(
+                    f"Fatal error in cycle {cycle} at {now_ist.isoformat()}:\n\n{e}"
+                )
             except Exception as alert_error:
                 log_event(
                     "error",
@@ -1528,6 +1544,7 @@ def main():
 
         log_event("info", "next_cycle_sleep", cycle=cycle, sleep_seconds=CHECK_INTERVAL_SECONDS)
         time.sleep(CHECK_INTERVAL_SECONDS)
+    log_event("info", "service_stopped")
 
 
 # ─────────────────────────────────────────────────────────────
