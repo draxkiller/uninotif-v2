@@ -1381,7 +1381,7 @@ def _is_within_active_window_ist(now_ist: datetime | None = None) -> bool:
     return ACTIVE_WINDOW_START_HOUR_IST <= now_ist.hour < ACTIVE_WINDOW_END_HOUR_IST
 
 
-def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> int:
+def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> int | None:
     if now_ist is None:
         now_ist = datetime.now(IST_TZ)
     if now_ist.hour < ACTIVE_WINDOW_START_HOUR_IST:
@@ -1394,7 +1394,7 @@ def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> in
         )
         next_start += timedelta(days=1)
     else:
-        return 0
+        return None
     seconds = int((next_start - now_ist).total_seconds())
     return max(seconds, 60)
 
@@ -1521,7 +1521,7 @@ def main():
         cycle += 1
         now_ist = datetime.now(IST_TZ)
         if not _is_within_active_window_ist(now_ist):
-            sleep_seconds = _seconds_until_next_active_window_ist(now_ist)
+            sleep_seconds = _seconds_until_next_active_window_ist(now_ist) or 60
             log_event(
                 "info",
                 "outside_active_window_sleep",
@@ -1544,7 +1544,7 @@ def main():
             )
             try:
                 alert_admin(
-                    f"Fatal error in cycle {cycle} at {now_ist.isoformat()}:\n\n{e}"
+                    f"Error in notification check cycle {cycle} at {now_ist.isoformat()}:\n\n{e}"
                 )
             except Exception as alert_error:
                 log_event(
