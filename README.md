@@ -79,7 +79,7 @@ python scraper.py
 Start/restart the App Service. The bot process will begin running continuously.
 
 On first run the bot will:
-- Scrape all current notifications and seed them into SQLite (without sending alerts)
+- Scrape all current notifications and seed them into the SQLite database (without sending alerts)
 - Send you an activation message confirming how many notifications were catalogued
 - From that point on, only **new** notifications trigger alerts
 

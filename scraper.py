@@ -39,6 +39,7 @@ ADMIN_CHAT_ID    = CHAT_IDS[0] if CHAT_IDS else ""
 
 BASE_URL         = "https://www.pondiuni.edu.in"
 NOTIF_URL        = f"{BASE_URL}/all-notifications/"
+# SQLite database path (Azure App Service persistent storage recommended).
 DB_FILE          = os.environ.get("SQLITE_DB_PATH", "uninotif.db")
 CHECK_INTERVAL_SECONDS = 5 * 60
 IST_TZ = ZoneInfo("Asia/Kolkata")
@@ -46,6 +47,7 @@ ACTIVE_WINDOW_START_HOUR_IST = 9
 ACTIVE_WINDOW_END_HOUR_IST = 21
 MINIMUM_SLEEP_SECONDS = 60
 SHUTDOWN_CHECK_INTERVAL_SECONDS = 5
+# RUN_24X7 is enabled unless explicitly set to false/0/no.
 RUN_24X7 = os.environ.get("RUN_24X7", "true").lower() not in ("false", "0", "no")
 
 DDE_BASE_URL = "https://dde.pondiuni.edu.in"
@@ -158,6 +160,7 @@ def _db_connect() -> sqlite3.Connection:
 
 def init_database():
     with _db_connect() as conn:
+        # WAL improves durability/performance for mixed read-write workloads in long-running services.
         conn.executescript(
             """
             PRAGMA journal_mode=WAL;
@@ -440,6 +443,10 @@ def _merge_results(results: list[dict], extras: list[dict], seen_ids: set, exist
 
 
 def fetch_all_notifications(seen_ids: set | None = None) -> tuple[list[dict], int, int]:
+    """Fetch notifications from monitored_sites table.
+
+    Returns (notifications, failed_sites, total_sites).
+    """
     seen_ids = seen_ids or set()
     sites = get_monitored_sites(enabled_only=True)
     results: list[dict] = []
@@ -1265,13 +1272,13 @@ def download_pdf(pdf_url: str, _retry: bool = True) -> str | None:
 # ─────────────────────────────────────────────────────────────
 # AI SUMMARY
 # ─────────────────────────────────────────────────────────────
-_AI_MAX_CHARS = 4500   # truncation limit fed to the model
+_AI_MAX_CHARS = 4500   # slightly larger context improves summary quality for longer PDF notices
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract plain text from a downloaded PDF using pdfplumber.
 
     Returns an empty string if extraction fails or pdfplumber is unavailable.
-    Only the first 8 pages are read to keep latency low.
+    Only the first 8 pages are read to balance extraction quality and latency.
     """
     try:
         import pdfplumber  # noqa: PLC0415
@@ -1281,7 +1288,8 @@ def extract_text_from_pdf(pdf_path: str) -> str:
                 page_text = page.extract_text()
                 if page_text:
                     text_parts.append(page_text)
-        return re.sub(r"\s+", " ", "\n".join(text_parts)).strip()
+        cleaned_parts = [re.sub(r"[ \t]+", " ", part).strip() for part in text_parts if part.strip()]
+        return "\n\n".join(cleaned_parts).strip()
     except Exception as e:
         print(f"    PDF text extraction error: {e}")
         return ""
@@ -1509,6 +1517,8 @@ def process_admin_commands():
     if not ADMIN_CHAT_ID:
         return
     offset_raw = db_get_state("telegram_update_offset", "0")
+    if offset_raw and not offset_raw.isdigit():
+        log_event("warning", "invalid_telegram_update_offset", raw_value=offset_raw)
     offset = int(offset_raw) if offset_raw.isdigit() else 0
     try:
         r = requests.get(
