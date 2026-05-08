@@ -1396,7 +1396,7 @@ def _seconds_until_next_active_window_ist(now_ist: datetime | None = None) -> in
         )
         next_start += timedelta(days=1)
     else:
-        return MINIMUM_SLEEP_SECONDS
+        raise ValueError("_seconds_until_next_active_window_ist must be called outside active hours")
     seconds = int((next_start - now_ist).total_seconds())
     return max(seconds, MINIMUM_SLEEP_SECONDS)
 
