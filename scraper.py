@@ -15,7 +15,6 @@ import logging
 import mimetypes, os, re, json, time, hashlib, requests
 import signal
 import traceback
-from urllib.parse import urlsplit
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -73,29 +72,6 @@ CUET_PG_LIST_PAGES = [
     (f"{CUET_PG_BASE_URL}/result.html",      "CUET-PG Result 📊"),
 ]
 
-ADMISSIONS_BASE_URL = "https://admissions.pondiuni.edu.in"
-
-# Admissions portal pages to monitor. Each entry is (url, category_label).
-ADMISSIONS_LIST_PAGES = [
-    (f"{ADMISSIONS_BASE_URL}/admissions/index.php", "Admissions Portal 📥"),
-]
-
-_ADMISSIONS_MIN_TITLE_LEN = 8
-_ADMISSIONS_SKIP_DOMAINS = ("facebook.com", "twitter.com", "instagram.com",
-                            "youtube.com", "linkedin.com", "x.com")
-_ADMISSIONS_GENERIC_TITLES = frozenset({
-    "read more", "click here", "download", "view more", "more details",
-    "contact us", "contact", "home", "about us", "about", "back", "next",
-    "previous", "submit", "apply now", "apply", "register", "login",
-    "sign in", "sign up", "know more", "view all", "see all",
-})
-_ADMISSIONS_CONTENT_CLASS_RE = re.compile(
-    r"entry[._-]content|post[._-]content|content[._-]area|main[._-]content"
-    r"|news[._-]list|notice[._-]board|updates|latest[._-]news"
-    r"|announcement|notification",
-    re.I,
-)
-
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -104,8 +80,6 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
-
-_NAV_CLASS_RE = re.compile(r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)
 
 TAB_SLUGS = {
     "Circulars":  ("Circulars",           "📋"),
@@ -198,92 +172,8 @@ def _fmt_wp_date(date_str: str) -> str:
         return date_str
 
 
-def _normalize_signature_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
-
-
-def _notification_signature_payload(
-    *,
-    title: str,
-    link: str,
-    category: str,
-    issued_by: str,
-    date: str,
-    body_text: str = "",
-    pdf_urls: list[str] | None = None,
-) -> str:
-    payload = {
-        "title": _normalize_signature_text(title),
-        "link": (link or "").strip(),
-        "category": _normalize_signature_text(category),
-        "issued_by": _normalize_signature_text(issued_by),
-        "date": _normalize_signature_text(date),
-        "body_text": _normalize_signature_text(body_text),
-        "pdf_urls": sorted({(url or "").strip() for url in (pdf_urls or []) if url}),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-
-
-def _legacy_notification_signature(notification_or_meta: dict, nid: str = "") -> str:
-    link = notification_or_meta.get("link", "")
-    if not link and isinstance(nid, str) and nid.startswith("http"):
-        link = nid
-    return _notification_signature_payload(
-        title=notification_or_meta.get("title", ""),
-        link=link,
-        category=notification_or_meta.get("category", ""),
-        issued_by=notification_or_meta.get("issued_by", ""),
-        date=notification_or_meta.get("date", ""),
-    )
-
-
-def _notification_signature(notification: dict) -> str:
-    body_html = notification.get("body_html", "")
-    body_text = ""
-    if body_html:
-        body_text = BeautifulSoup(body_html, "html.parser").get_text(separator=" ", strip=True)
-    pdf_urls = notification.get("pdf_urls")
-    if pdf_urls is None and notification.get("pdf_url"):
-        pdf_urls = [notification["pdf_url"]]
-    return _notification_signature_payload(
-        title=notification.get("title", ""),
-        link=notification.get("link", ""),
-        category=notification.get("category", ""),
-        issued_by=notification.get("issued_by", ""),
-        date=notification.get("date", ""),
-        body_text=body_text,
-        pdf_urls=pdf_urls,
-    )
-
-
-def _classify_notification_change(notification: dict, previous: dict | None) -> tuple[str, str]:
-    current_signature = _notification_signature(notification)
-    if previous is None:
-        return "new", current_signature
-    previous_signature = previous.get("signature")
-    if previous_signature:
-        return ("unchanged", current_signature) if previous_signature == current_signature else ("updated", current_signature)
-    legacy_current_signature = _legacy_notification_signature(notification)
-    legacy_previous_signature = _legacy_notification_signature(previous, notification["id"])
-    return ("unchanged", current_signature) if legacy_previous_signature == legacy_current_signature else ("updated", current_signature)
-
-
-def _build_seen_entry(notification: dict, *, notified: str, signature: str) -> dict:
-    return {
-        "title": notification["title"],
-        "date": notification.get("date", ""),
-        "category": notification.get("category", ""),
-        "issued_by": notification.get("issued_by", ""),
-        "link": notification.get("link", ""),
-        "signature": signature,
-        "notified": notified,
-    }
-
-
-def fetch_all_notifications() -> list[dict]:
-    results = _try_wp_rest_api()
+def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
+    results = _try_wp_rest_api(seen_ids)
     if results is not None:
         print(f"  [API]  {len(results)} notifications via WP REST API")
     else:
@@ -295,7 +185,7 @@ def fetch_all_notifications() -> list[dict]:
     for section_url, category in EXTRA_SECTIONS:
         extras = _scrape_section_links(section_url, category)
         for item in extras:
-            if item["link"] not in existing_links:
+            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -303,7 +193,7 @@ def fetch_all_notifications() -> list[dict]:
     for dde_url, category in DDE_LIST_PAGES:
         dde_items = _scrape_dde_list_page(dde_url, category)
         for item in dde_items:
-            if item["link"] not in existing_links:
+            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -311,22 +201,14 @@ def fetch_all_notifications() -> list[dict]:
     for cuet_url, category in CUET_PG_LIST_PAGES:
         cuet_items = _scrape_cuet_pg_page(cuet_url, category)
         for item in cuet_items:
-            if item["link"] not in existing_links:
-                results.append(item)
-                existing_links.add(item["link"])
-
-    # Scrape admissions portal pages.
-    for admissions_url, category in ADMISSIONS_LIST_PAGES:
-        admissions_items = _scrape_admissions_page(admissions_url, category)
-        for item in admissions_items:
-            if item["link"] not in existing_links:
+            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
     return results
 
 
-def _try_wp_rest_api() -> list[dict] | None:
+def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
     """Return a list of notifications from the WP REST API, or None if unavailable."""
     all_items = []
     api_failed = False
@@ -376,6 +258,9 @@ def _try_wp_rest_api() -> list[dict] | None:
                 if pdf_urls:
                     entry["pdf_urls"] = pdf_urls
                 all_items.append(entry)
+            # If every item on this page is already known, older pages will be too
+            if seen_ids and all(str(item["id"]) in seen_ids for item in items):
+                break
         except Exception as e:
             print(f"  WP API page {page} error: {e}")
             if not all_items:
@@ -474,7 +359,8 @@ def _scrape_section_links(section_url: str, category: str) -> list[dict]:
     # Strip navigation / decorative regions
     for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
         tag.decompose()
-    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
+    for tag in soup.find_all(True, {"class": re.compile(
+            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
         tag.decompose()
 
     content = (
@@ -548,7 +434,8 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
     # Strip navigation / decorative regions
     for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
         tag.decompose()
-    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
+    for tag in soup.find_all(True, {"class": re.compile(
+            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
         tag.decompose()
 
     content = (
@@ -682,7 +569,8 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
     # Strip navigation / decorative regions
     for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
         tag.decompose()
-    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
+    for tag in soup.find_all(True, {"class": re.compile(
+            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
         tag.decompose()
 
     content = (
@@ -780,148 +668,6 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
         })
 
     print(f"  [CUET-PG] {len(results)} notification(s) found on {page_url}")
-    return results
-
-
-def _abs_admissions(href: str) -> str:
-    """Convert a relative URL to absolute using ADMISSIONS_BASE_URL."""
-    href = href.strip()
-    if href.startswith("http://") or href.startswith("https://"):
-        return href
-    if href.startswith("//"):
-        return "https:" + href
-    if href.startswith("/"):
-        return ADMISSIONS_BASE_URL + href
-    return ADMISSIONS_BASE_URL + "/" + href
-
-
-def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
-    """Scrape the Pondicherry University admissions portal for notification links."""
-    def _is_valid_href(href: str) -> bool:
-        href_l = href.lower()
-        if href_l.startswith("javascript:") or href_l.startswith("mailto:"):
-            return False
-        parsed = urlsplit(href_l)
-        host = parsed.hostname or ""
-        if any(host == domain or host.endswith(f".{domain}") for domain in _ADMISSIONS_SKIP_DOMAINS):
-            return False
-        if host == "admissions.pondiuni.edu.in":
-            return True
-        return host in {"pondiuni.edu.in", "www.pondiuni.edu.in"} and parsed.path.startswith("/admissions")
-
-    def _is_fragment_of_page(href: str, pg_url: str) -> bool:
-        return href.split("#")[0].rstrip("/") == pg_url.rstrip("/")
-
-    try:
-        r = requests.get(page_url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"  Failed to fetch admissions page {page_url}: {e}")
-        return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    # Strip navigation / decorative regions
-    for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
-        tag.decompose()
-    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
-        tag.decompose()
-
-    content = (
-        soup.find("main")
-        or soup.find("div", {"class": _ADMISSIONS_CONTENT_CLASS_RE})
-        or soup
-    )
-
-    results: list[dict] = []
-    seen_links: set = set()
-
-    # ── 1. Table rows (title cell + optional issued-by + date cells) ──
-    for row in content.find_all("tr"):
-        cells = row.find_all("td")
-        if not cells:
-            continue
-        link_tag = cells[0].find("a", href=True)
-        if not link_tag:
-            continue
-        href = _abs_admissions(link_tag["href"])
-        title = link_tag.get_text(strip=True)
-        if not title or len(title) < _ADMISSIONS_MIN_TITLE_LEN:
-            continue
-        normalized_title = title.strip().lower()
-        if normalized_title in _ADMISSIONS_GENERIC_TITLES:
-            continue
-        if href in seen_links:
-            continue
-        if not _is_valid_href(href):
-            continue
-        if _is_fragment_of_page(href, page_url):
-            continue
-        issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
-        date_str = cells[2].get_text(strip=True) if len(cells) > 2 else ""
-        seen_links.add(href)
-        results.append({
-            "id": href,
-            "title": title,
-            "link": href,
-            "category": category,
-            "issued_by": issued_by,
-            "date": date_str,
-        })
-
-    # ── 2. List items (<li> with a link) ───────────────────────
-    for li in content.find_all("li"):
-        link_tag = li.find("a", href=True)
-        if not link_tag:
-            continue
-        href = _abs_admissions(link_tag["href"])
-        title = link_tag.get_text(strip=True) or li.get_text(strip=True)
-        if not title or len(title) < _ADMISSIONS_MIN_TITLE_LEN:
-            continue
-        normalized_title = title.strip().lower()
-        if normalized_title in _ADMISSIONS_GENERIC_TITLES:
-            continue
-        if href in seen_links:
-            continue
-        if not _is_valid_href(href):
-            continue
-        if _is_fragment_of_page(href, page_url):
-            continue
-        seen_links.add(href)
-        results.append({
-            "id": href,
-            "title": title,
-            "link": href,
-            "category": category,
-            "issued_by": "",
-            "date": "",
-        })
-
-    # ── 3. Generic link scan (catch any remaining anchors) ─────
-    for a in content.find_all("a", href=True):
-        href = _abs_admissions(a["href"])
-        title = a.get_text(strip=True)
-        if not title or len(title) < _ADMISSIONS_MIN_TITLE_LEN:
-            continue
-        normalized_title = title.strip().lower()
-        if normalized_title in _ADMISSIONS_GENERIC_TITLES:
-            continue
-        if href in seen_links:
-            continue
-        if not _is_valid_href(href):
-            continue
-        if _is_fragment_of_page(href, page_url):
-            continue
-        seen_links.add(href)
-        results.append({
-            "id": href,
-            "title": title,
-            "link": href,
-            "category": category,
-            "issued_by": "",
-            "date": "",
-        })
-
-    print(f"  [Admissions] {len(results)} notification(s) found on {page_url}")
     return results
 
 # ─────────────────────────────────────────────────────────────
@@ -1086,7 +832,8 @@ def get_pdf_urls(detail_url: str) -> list[str]:
         # Remove nav/header/footer so their PDFs don't pollute results
         for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
             tag.decompose()
-        for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
+        for tag in soup.find_all(True, {"class": re.compile(
+                r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
             tag.decompose()
 
         # Try main content area first, fall back to full page
@@ -1357,7 +1104,6 @@ _DDE_TITLE_RE = re.compile(r'^DDE\s*[–—-]', re.IGNORECASE)
 def build_caption(n: dict, summary: str = "") -> str:
     summary_block = f"\n🤖 <b>AI Summary:</b>\n{summary}\n" if summary else ""
     category = n.get("category", "General")
-    is_updated = n.get("change_type") == "updated"
     # Identify DDE notifications by checking against the known DDE category labels,
     # or by title prefix (e.g. "DDE – …") for items that arrive via the main API.
     _dde_categories = {cat for _, cat in DDE_LIST_PAGES}
@@ -1369,29 +1115,22 @@ def build_caption(n: dict, summary: str = "") -> str:
     # Identify CUET-PG (NTA) notifications by category label.
     _cuet_pg_categories = {cat for _, cat in CUET_PG_LIST_PAGES}
     is_cuet_pg = category in _cuet_pg_categories
-    _admissions_categories = {cat for _, cat in ADMISSIONS_LIST_PAGES}
-    is_admissions = category in _admissions_categories
 
     if is_cuet_pg:
         institution = "🏛 <b>NTA — CUET-PG</b>\n<i>(National Testing Agency)</i>"
-    elif is_admissions:
-        institution = "🏛 <b>Pondicherry University — Admissions</b>"
     elif is_dde:
         institution = "🏛 <b>Pondicherry University — DDE</b>\n<i>(Distance Education)</i>"
     else:
         institution = "🏛 <b>Pondicherry University</b>"
-    heading = "♻️ <b>UPDATED NOTIFICATION</b>" if is_updated else "🔔 <b>NEW NOTIFICATION</b>"
-    status_line = "\n🔄 <b>Status   :</b> Updated on website" if is_updated else ""
 
     return (
-        f"{heading}\n"
+        f"🔔 <b>NEW NOTIFICATION</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{institution}\n\n"
         f"📁 <b>Category :</b> {category}\n"
         f"📄 <b>Title    :</b> <code>{html.escape(n['title'])}</code>\n"
         f"🏢 <b>Issued by:</b> {n.get('issued_by') or '—'}\n"
         f"📅 <b>Date     :</b> {n.get('date') or '—'}"
-        f"{status_line}"
         f"{summary_block}\n"
         f"🔗 <a href=\"{n['link']}\">Open on Website ↗</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
@@ -1609,9 +1348,9 @@ def _resend_last(n: int, seen: dict, recent_notifications: list[dict]):
             notif = {
                 "id":        nid,
                 "title":     title,
-                "link":      meta.get("link") or (nid if nid.startswith("http") else ""),
+                "link":      nid if nid.startswith("http") else "",
                 "category":  meta.get("category", "General"),
-                "issued_by": meta.get("issued_by", ""),
+                "issued_by": "",
                 "date":      meta.get("date", ""),
             }
 
@@ -1690,7 +1429,7 @@ def run_notification_check_once():
 
     notifications = []
     try:
-        notifications = fetch_all_notifications()
+        notifications = fetch_all_notifications(seen_ids=set(seen.keys()))
     except Exception as e:
         err_msg = f"Failed to fetch notifications: {e}"
         print(f"  ERROR: {err_msg}")
@@ -1710,46 +1449,37 @@ def run_notification_check_once():
         print("  ⚡ First run — seeding seen.json without sending alerts.")
 
     new_count = 0
-    updated_count = 0
     errors    = 0
 
     for n in notifications:
         nid = n["id"]
-        previous = seen.get(nid)
-        change_type, signature = _classify_notification_change(n, previous)
-        if change_type == "unchanged":
-            if previous and previous.get("signature") != signature:
-                seen[nid] = _build_seen_entry(
-                    n,
-                    notified=previous.get("notified", "seeded"),
-                    signature=signature,
-                )
+        if nid in seen:
             continue
 
         if is_first_run:
-            seen[nid] = _build_seen_entry(n, notified="seeded", signature=signature)
+            seen[nid] = {
+                "title":    n["title"],
+                "date":     n.get("date", ""),
+                "category": n.get("category", ""),
+                "notified": "seeded",
+            }
             continue
 
-        is_update = change_type == "updated"
-        n["change_type"] = change_type
-
-        print(f"\n  {'♻️' if is_update else '🆕'} {n['title'][:70]}")
+        print(f"\n  🆕 {n['title'][:70]}")
         print(f"     {n.get('category','')}  |  {n.get('date','')}")
 
         # Mark as seen BEFORE delivering — prevents re-sends if job times out mid-run
-        seen[nid] = _build_seen_entry(
-            n,
-            notified=datetime.now(timezone.utc).isoformat(),
-            signature=signature,
-        )
+        seen[nid] = {
+            "title":    n["title"],
+            "date":     n.get("date", ""),
+            "category": n.get("category", ""),
+            "notified": datetime.now(timezone.utc).isoformat(),
+        }
         save_json(SEEN_FILE, seen)   # persist immediately
 
         try:
             deliver(n)
-            if is_update:
-                updated_count += 1
-            else:
-                new_count += 1
+            new_count += 1
         except Exception as e:
             print(f"    ERROR delivering: {e}")
             errors += 1
@@ -1770,7 +1500,7 @@ def run_notification_check_once():
             f"🏛 <i>Pondicherry University</i>"
         )
     else:
-        print(f"\n  ✅ Done. {new_count} new | {updated_count} updated | {errors} errors.")
+        print(f"\n  ✅ Done. {new_count} new | {errors} errors.")
         maybe_send_heartbeat(seen)
 
     # ── Resend last N notifications ───────────────────────────
@@ -1912,33 +1642,6 @@ def _run_tests():
         "https://www.pondiuni.edu.in/wp-content/uploads/b.pdf",
     ]
     _check("tie → first URL wins", choose_primary_pdf_url(urls_equal), urls_equal[0])
-
-    legacy_meta = {
-        "title": "Hostel Circular",
-        "date": "10 Apr 2026",
-        "category": "General 🔔",
-        "issued_by": "Admin",
-        "notified": "seeded",
-    }
-    same_notification = {
-        "id": "https://example.com/hostel-circular",
-        "title": "Hostel Circular",
-        "link": "https://example.com/hostel-circular",
-        "category": "General 🔔",
-        "issued_by": "Admin",
-        "date": "10 Apr 2026",
-    }
-    changed_notification = dict(same_notification, title="Hostel Circular (Updated)")
-
-    change_type, same_signature = _classify_notification_change(same_notification, None)
-    _check("missing seen entry → new", change_type, "new")
-    _check("new entry returns a signature", isinstance(same_signature, str) and len(same_signature) == 64, True)
-
-    change_type, _ = _classify_notification_change(same_notification, legacy_meta)
-    _check("legacy metadata unchanged → unchanged", change_type, "unchanged")
-
-    change_type, _ = _classify_notification_change(changed_notification, legacy_meta)
-    _check("legacy metadata title change → updated", change_type, "updated")
 
     print(f"\n  {passed} passed, {failed} failed")
     sys.exit(0 if failed == 0 else 1)
