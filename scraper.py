@@ -72,6 +72,13 @@ CUET_PG_LIST_PAGES = [
     (f"{CUET_PG_BASE_URL}/result.html",      "CUET-PG Result 📊"),
 ]
 
+ADMISSIONS_BASE_URL = "https://admissions.pondiuni.edu.in"
+
+# Admissions portal pages to monitor. Each entry is (url, category_label).
+ADMISSIONS_LIST_PAGES = [
+    (f"{ADMISSIONS_BASE_URL}/admissions/index.php", "Admissions Portal 📥"),
+]
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -201,6 +208,14 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for cuet_url, category in CUET_PG_LIST_PAGES:
         cuet_items = _scrape_cuet_pg_page(cuet_url, category)
         for item in cuet_items:
+            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+                results.append(item)
+                existing_links.add(item["link"])
+
+    # Scrape admissions portal pages.
+    for admissions_url, category in ADMISSIONS_LIST_PAGES:
+        admissions_items = _scrape_admissions_page(admissions_url, category)
+        for item in admissions_items:
             if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
@@ -670,6 +685,156 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
     print(f"  [CUET-PG] {len(results)} notification(s) found on {page_url}")
     return results
 
+
+def _abs_admissions(href: str) -> str:
+    """Convert a relative URL to absolute using ADMISSIONS_BASE_URL."""
+    href = href.strip()
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return ADMISSIONS_BASE_URL + href
+    return ADMISSIONS_BASE_URL + "/" + href
+
+
+def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
+    """Scrape the Pondicherry University admissions portal for notification links."""
+    _MIN_TITLE_LEN = 8
+    _SKIP_HREF = ("javascript:", "mailto:", "facebook.com", "twitter.com",
+                  "instagram.com", "youtube.com", "linkedin.com", "x.com")
+    _GENERIC_TITLES = frozenset({
+        "read more", "click here", "download", "view more", "more details",
+        "contact us", "contact", "home", "about us", "about", "back", "next",
+        "previous", "submit", "apply now", "apply", "register", "login",
+        "sign in", "sign up", "know more", "view all", "see all",
+    })
+
+    def _is_valid_href(href: str) -> bool:
+        href_l = href.lower()
+        if any(skip in href_l for skip in _SKIP_HREF):
+            return False
+        return (
+            "admissions.pondiuni.edu.in" in href_l
+            or "pondiuni.edu.in/admissions" in href_l
+        )
+
+    def _is_fragment_of_page(href: str, pg_url: str = page_url) -> bool:
+        return href.split("#")[0].rstrip("/") == pg_url.rstrip("/")
+
+    try:
+        r = requests.get(page_url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  Failed to fetch admissions page {page_url}: {e}")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    # Strip navigation / decorative regions
+    for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
+        tag.decompose()
+    for tag in soup.find_all(True, {"class": re.compile(
+            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+        tag.decompose()
+
+    content = (
+        soup.find("main")
+        or soup.find("div", {"class": re.compile(
+            r"entry[._-]content|post[._-]content|content[._-]area|main[._-]content"
+            r"|news[._-]list|notice[._-]board|updates|latest[._-]news"
+            r"|announcement|notification", re.I)})
+        or soup
+    )
+
+    results: list[dict] = []
+    seen_links: set = set()
+
+    # ── 1. Table rows (title cell + optional issued-by + date cells) ──
+    for row in content.find_all("tr"):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        link_tag = cells[0].find("a", href=True)
+        if not link_tag:
+            continue
+        href = _abs_admissions(link_tag["href"])
+        title = link_tag.get_text(strip=True)
+        if not title or len(title) < _MIN_TITLE_LEN:
+            continue
+        if title.lower().strip() in _GENERIC_TITLES:
+            continue
+        if href in seen_links:
+            continue
+        if not _is_valid_href(href):
+            continue
+        if _is_fragment_of_page(href):
+            continue
+        issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+        date_str = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+        seen_links.add(href)
+        results.append({
+            "id": href,
+            "title": title,
+            "link": href,
+            "category": category,
+            "issued_by": issued_by,
+            "date": date_str,
+        })
+
+    # ── 2. List items (<li> with a link) ───────────────────────
+    for li in content.find_all("li"):
+        link_tag = li.find("a", href=True)
+        if not link_tag:
+            continue
+        href = _abs_admissions(link_tag["href"])
+        title = link_tag.get_text(strip=True) or li.get_text(strip=True)
+        if not title or len(title) < _MIN_TITLE_LEN:
+            continue
+        if title.lower().strip() in _GENERIC_TITLES:
+            continue
+        if href in seen_links:
+            continue
+        if not _is_valid_href(href):
+            continue
+        if _is_fragment_of_page(href):
+            continue
+        seen_links.add(href)
+        results.append({
+            "id": href,
+            "title": title,
+            "link": href,
+            "category": category,
+            "issued_by": "",
+            "date": "",
+        })
+
+    # ── 3. Generic link scan (catch any remaining anchors) ─────
+    for a in content.find_all("a", href=True):
+        href = _abs_admissions(a["href"])
+        title = a.get_text(strip=True)
+        if not title or len(title) < _MIN_TITLE_LEN:
+            continue
+        if title.lower().strip() in _GENERIC_TITLES:
+            continue
+        if href in seen_links:
+            continue
+        if not _is_valid_href(href):
+            continue
+        if _is_fragment_of_page(href):
+            continue
+        seen_links.add(href)
+        results.append({
+            "id": href,
+            "title": title,
+            "link": href,
+            "category": category,
+            "issued_by": "",
+            "date": "",
+        })
+
+    print(f"  [Admissions] {len(results)} notification(s) found on {page_url}")
+    return results
+
 # ─────────────────────────────────────────────────────────────
 # PDF EXTRACTION + DOWNLOAD
 # ─────────────────────────────────────────────────────────────
@@ -1115,9 +1280,13 @@ def build_caption(n: dict, summary: str = "") -> str:
     # Identify CUET-PG (NTA) notifications by category label.
     _cuet_pg_categories = {cat for _, cat in CUET_PG_LIST_PAGES}
     is_cuet_pg = category in _cuet_pg_categories
+    _admissions_categories = {cat for _, cat in ADMISSIONS_LIST_PAGES}
+    is_admissions = category in _admissions_categories
 
     if is_cuet_pg:
         institution = "🏛 <b>NTA — CUET-PG</b>\n<i>(National Testing Agency)</i>"
+    elif is_admissions:
+        institution = "🏛 <b>Pondicherry University — Admissions</b>"
     elif is_dde:
         institution = "🏛 <b>Pondicherry University — DDE</b>\n<i>(Distance Education)</i>"
     else:
