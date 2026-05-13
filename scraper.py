@@ -15,6 +15,7 @@ import logging
 import mimetypes, os, re, json, time, hashlib, requests
 import signal
 import traceback
+from urllib.parse import urlsplit
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -87,6 +88,8 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+_NAV_CLASS_RE = re.compile(r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)
 
 TAB_SLUGS = {
     "Circulars":  ("Circulars",           "📋"),
@@ -374,8 +377,7 @@ def _scrape_section_links(section_url: str, category: str) -> list[dict]:
     # Strip navigation / decorative regions
     for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
         tag.decompose()
-    for tag in soup.find_all(True, {"class": re.compile(
-            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
         tag.decompose()
 
     content = (
@@ -449,8 +451,7 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
     # Strip navigation / decorative regions
     for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
         tag.decompose()
-    for tag in soup.find_all(True, {"class": re.compile(
-            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
         tag.decompose()
 
     content = (
@@ -584,8 +585,7 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
     # Strip navigation / decorative regions
     for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
         tag.decompose()
-    for tag in soup.find_all(True, {"class": re.compile(
-            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
         tag.decompose()
 
     content = (
@@ -701,8 +701,8 @@ def _abs_admissions(href: str) -> str:
 def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
     """Scrape the Pondicherry University admissions portal for notification links."""
     _MIN_TITLE_LEN = 8
-    _SKIP_HREF = ("javascript:", "mailto:", "facebook.com", "twitter.com",
-                  "instagram.com", "youtube.com", "linkedin.com", "x.com")
+    _SKIP_DOMAINS = ("facebook.com", "twitter.com", "instagram.com",
+                     "youtube.com", "linkedin.com", "x.com")
     _GENERIC_TITLES = frozenset({
         "read more", "click here", "download", "view more", "more details",
         "contact us", "contact", "home", "about us", "about", "back", "next",
@@ -712,7 +712,11 @@ def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
 
     def _is_valid_href(href: str) -> bool:
         href_l = href.lower()
-        if any(skip in href_l for skip in _SKIP_HREF):
+        if href_l.startswith("javascript:") or href_l.startswith("mailto:"):
+            return False
+        parsed = urlsplit(href_l)
+        netloc = parsed.netloc
+        if any(domain in netloc for domain in _SKIP_DOMAINS):
             return False
         return (
             "admissions.pondiuni.edu.in" in href_l
@@ -733,8 +737,7 @@ def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
     # Strip navigation / decorative regions
     for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
         tag.decompose()
-    for tag in soup.find_all(True, {"class": re.compile(
-            r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+    for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
         tag.decompose()
 
     content = (
@@ -997,8 +1000,7 @@ def get_pdf_urls(detail_url: str) -> list[str]:
         # Remove nav/header/footer so their PDFs don't pollute results
         for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
             tag.decompose()
-        for tag in soup.find_all(True, {"class": re.compile(
-                r"nav|menu|header|footer|sidebar|breadcrumb|widget", re.I)}):
+        for tag in soup.find_all(True, {"class": _NAV_CLASS_RE}):
             tag.decompose()
 
         # Try main content area first, fall back to full page
