@@ -198,8 +198,92 @@ def _fmt_wp_date(date_str: str) -> str:
         return date_str
 
 
-def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
-    results = _try_wp_rest_api(seen_ids)
+def _normalize_signature_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def _notification_signature_payload(
+    *,
+    title: str,
+    link: str,
+    category: str,
+    issued_by: str,
+    date: str,
+    body_text: str = "",
+    pdf_urls: list[str] | None = None,
+) -> str:
+    payload = {
+        "title": _normalize_signature_text(title),
+        "link": (link or "").strip(),
+        "category": _normalize_signature_text(category),
+        "issued_by": _normalize_signature_text(issued_by),
+        "date": _normalize_signature_text(date),
+        "body_text": _normalize_signature_text(body_text),
+        "pdf_urls": sorted({(url or "").strip() for url in (pdf_urls or []) if url}),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _legacy_notification_signature(notification_or_meta: dict, nid: str = "") -> str:
+    link = notification_or_meta.get("link", "")
+    if not link and isinstance(nid, str) and nid.startswith("http"):
+        link = nid
+    return _notification_signature_payload(
+        title=notification_or_meta.get("title", ""),
+        link=link,
+        category=notification_or_meta.get("category", ""),
+        issued_by=notification_or_meta.get("issued_by", ""),
+        date=notification_or_meta.get("date", ""),
+    )
+
+
+def _notification_signature(notification: dict) -> str:
+    body_html = notification.get("body_html", "")
+    body_text = ""
+    if body_html:
+        body_text = BeautifulSoup(body_html, "html.parser").get_text(separator=" ", strip=True)
+    pdf_urls = notification.get("pdf_urls")
+    if pdf_urls is None and notification.get("pdf_url"):
+        pdf_urls = [notification["pdf_url"]]
+    return _notification_signature_payload(
+        title=notification.get("title", ""),
+        link=notification.get("link", ""),
+        category=notification.get("category", ""),
+        issued_by=notification.get("issued_by", ""),
+        date=notification.get("date", ""),
+        body_text=body_text,
+        pdf_urls=pdf_urls,
+    )
+
+
+def _classify_notification_change(notification: dict, previous: dict | None) -> tuple[str, str]:
+    current_signature = _notification_signature(notification)
+    if previous is None:
+        return "new", current_signature
+    previous_signature = previous.get("signature")
+    if previous_signature:
+        return ("unchanged", current_signature) if previous_signature == current_signature else ("updated", current_signature)
+    legacy_current_signature = _legacy_notification_signature(notification)
+    legacy_previous_signature = _legacy_notification_signature(previous, notification["id"])
+    return ("unchanged", current_signature) if legacy_previous_signature == legacy_current_signature else ("updated", current_signature)
+
+
+def _build_seen_entry(notification: dict, *, notified: str, signature: str) -> dict:
+    return {
+        "title": notification["title"],
+        "date": notification.get("date", ""),
+        "category": notification.get("category", ""),
+        "issued_by": notification.get("issued_by", ""),
+        "link": notification.get("link", ""),
+        "signature": signature,
+        "notified": notified,
+    }
+
+
+def fetch_all_notifications() -> list[dict]:
+    results = _try_wp_rest_api()
     if results is not None:
         print(f"  [API]  {len(results)} notifications via WP REST API")
     else:
@@ -211,7 +295,7 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for section_url, category in EXTRA_SECTIONS:
         extras = _scrape_section_links(section_url, category)
         for item in extras:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -219,7 +303,7 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for dde_url, category in DDE_LIST_PAGES:
         dde_items = _scrape_dde_list_page(dde_url, category)
         for item in dde_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -227,7 +311,7 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for cuet_url, category in CUET_PG_LIST_PAGES:
         cuet_items = _scrape_cuet_pg_page(cuet_url, category)
         for item in cuet_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -235,14 +319,14 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for admissions_url, category in ADMISSIONS_LIST_PAGES:
         admissions_items = _scrape_admissions_page(admissions_url, category)
         for item in admissions_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
     return results
 
 
-def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
+def _try_wp_rest_api() -> list[dict] | None:
     """Return a list of notifications from the WP REST API, or None if unavailable."""
     all_items = []
     api_failed = False
@@ -292,9 +376,6 @@ def _try_wp_rest_api(seen_ids: set | None = None) -> list[dict] | None:
                 if pdf_urls:
                     entry["pdf_urls"] = pdf_urls
                 all_items.append(entry)
-            # If every item on this page is already known, older pages will be too
-            if seen_ids and all(str(item["id"]) in seen_ids for item in items):
-                break
         except Exception as e:
             print(f"  WP API page {page} error: {e}")
             if not all_items:
@@ -1276,6 +1357,7 @@ _DDE_TITLE_RE = re.compile(r'^DDE\s*[–—-]', re.IGNORECASE)
 def build_caption(n: dict, summary: str = "") -> str:
     summary_block = f"\n🤖 <b>AI Summary:</b>\n{summary}\n" if summary else ""
     category = n.get("category", "General")
+    is_updated = n.get("change_type") == "updated"
     # Identify DDE notifications by checking against the known DDE category labels,
     # or by title prefix (e.g. "DDE – …") for items that arrive via the main API.
     _dde_categories = {cat for _, cat in DDE_LIST_PAGES}
@@ -1298,15 +1380,18 @@ def build_caption(n: dict, summary: str = "") -> str:
         institution = "🏛 <b>Pondicherry University — DDE</b>\n<i>(Distance Education)</i>"
     else:
         institution = "🏛 <b>Pondicherry University</b>"
+    heading = "♻️ <b>UPDATED NOTIFICATION</b>" if is_updated else "🔔 <b>NEW NOTIFICATION</b>"
+    status_line = "\n🔄 <b>Status   :</b> Updated on website" if is_updated else ""
 
     return (
-        f"🔔 <b>NEW NOTIFICATION</b>\n"
+        f"{heading}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{institution}\n\n"
         f"📁 <b>Category :</b> {category}\n"
         f"📄 <b>Title    :</b> <code>{html.escape(n['title'])}</code>\n"
         f"🏢 <b>Issued by:</b> {n.get('issued_by') or '—'}\n"
         f"📅 <b>Date     :</b> {n.get('date') or '—'}"
+        f"{status_line}"
         f"{summary_block}\n"
         f"🔗 <a href=\"{n['link']}\">Open on Website ↗</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
@@ -1524,9 +1609,9 @@ def _resend_last(n: int, seen: dict, recent_notifications: list[dict]):
             notif = {
                 "id":        nid,
                 "title":     title,
-                "link":      nid if nid.startswith("http") else "",
+                "link":      meta.get("link") or (nid if nid.startswith("http") else ""),
                 "category":  meta.get("category", "General"),
-                "issued_by": "",
+                "issued_by": meta.get("issued_by", ""),
                 "date":      meta.get("date", ""),
             }
 
@@ -1605,7 +1690,7 @@ def run_notification_check_once():
 
     notifications = []
     try:
-        notifications = fetch_all_notifications(seen_ids=set(seen.keys()))
+        notifications = fetch_all_notifications()
     except Exception as e:
         err_msg = f"Failed to fetch notifications: {e}"
         print(f"  ERROR: {err_msg}")
@@ -1625,37 +1710,46 @@ def run_notification_check_once():
         print("  ⚡ First run — seeding seen.json without sending alerts.")
 
     new_count = 0
+    updated_count = 0
     errors    = 0
 
     for n in notifications:
         nid = n["id"]
-        if nid in seen:
+        previous = seen.get(nid)
+        change_type, signature = _classify_notification_change(n, previous)
+        if change_type == "unchanged":
+            if previous and previous.get("signature") != signature:
+                seen[nid] = _build_seen_entry(
+                    n,
+                    notified=previous.get("notified", "seeded"),
+                    signature=signature,
+                )
             continue
 
         if is_first_run:
-            seen[nid] = {
-                "title":    n["title"],
-                "date":     n.get("date", ""),
-                "category": n.get("category", ""),
-                "notified": "seeded",
-            }
+            seen[nid] = _build_seen_entry(n, notified="seeded", signature=signature)
             continue
 
-        print(f"\n  🆕 {n['title'][:70]}")
+        is_update = change_type == "updated"
+        n["change_type"] = change_type
+
+        print(f"\n  {'♻️' if is_update else '🆕'} {n['title'][:70]}")
         print(f"     {n.get('category','')}  |  {n.get('date','')}")
 
         # Mark as seen BEFORE delivering — prevents re-sends if job times out mid-run
-        seen[nid] = {
-            "title":    n["title"],
-            "date":     n.get("date", ""),
-            "category": n.get("category", ""),
-            "notified": datetime.now(timezone.utc).isoformat(),
-        }
+        seen[nid] = _build_seen_entry(
+            n,
+            notified=datetime.now(timezone.utc).isoformat(),
+            signature=signature,
+        )
         save_json(SEEN_FILE, seen)   # persist immediately
 
         try:
             deliver(n)
-            new_count += 1
+            if is_update:
+                updated_count += 1
+            else:
+                new_count += 1
         except Exception as e:
             print(f"    ERROR delivering: {e}")
             errors += 1
@@ -1676,7 +1770,7 @@ def run_notification_check_once():
             f"🏛 <i>Pondicherry University</i>"
         )
     else:
-        print(f"\n  ✅ Done. {new_count} new | {errors} errors.")
+        print(f"\n  ✅ Done. {new_count} new | {updated_count} updated | {errors} errors.")
         maybe_send_heartbeat(seen)
 
     # ── Resend last N notifications ───────────────────────────
@@ -1818,6 +1912,33 @@ def _run_tests():
         "https://www.pondiuni.edu.in/wp-content/uploads/b.pdf",
     ]
     _check("tie → first URL wins", choose_primary_pdf_url(urls_equal), urls_equal[0])
+
+    legacy_meta = {
+        "title": "Hostel Circular",
+        "date": "10 Apr 2026",
+        "category": "General 🔔",
+        "issued_by": "Admin",
+        "notified": "seeded",
+    }
+    same_notification = {
+        "id": "https://example.com/hostel-circular",
+        "title": "Hostel Circular",
+        "link": "https://example.com/hostel-circular",
+        "category": "General 🔔",
+        "issued_by": "Admin",
+        "date": "10 Apr 2026",
+    }
+    changed_notification = dict(same_notification, title="Hostel Circular (Updated)")
+
+    change_type, same_signature = _classify_notification_change(same_notification, None)
+    _check("missing seen entry → new", change_type, "new")
+    _check("new entry returns a signature", isinstance(same_signature, str) and len(same_signature) == 64, True)
+
+    change_type, _ = _classify_notification_change(same_notification, legacy_meta)
+    _check("legacy metadata unchanged → unchanged", change_type, "unchanged")
+
+    change_type, _ = _classify_notification_change(changed_notification, legacy_meta)
+    _check("legacy metadata title change → updated", change_type, "updated")
 
     print(f"\n  {passed} passed, {failed} failed")
     sys.exit(0 if failed == 0 else 1)

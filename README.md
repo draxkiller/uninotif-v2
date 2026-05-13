@@ -10,6 +10,7 @@ Automatically monitors [Pondicherry University's notification page](https://www.
 - **DDE notifications** — Announcements, Exam Notifications, and Exam Results from the Directorate of Distance Education (`dde.pondiuni.edu.in`)
 - **CUET-PG / NTA notifications** — Notices, Instructions, Date Sheet, Admit Cards, Answer Keys, and Results from [https://exams.nta.nic.in/cuet-pg/](https://exams.nta.nic.in/cuet-pg/)
 - **Admissions portal notifications** — link updates from [https://admissions.pondiuni.edu.in/admissions/index.php](https://admissions.pondiuni.edu.in/admissions/index.php)
+- **Important update detection** — alerts when an already-tracked notification changes its title, date, issuer, attachment list, or main body content
 - **PDF delivery** — attaches the notification's PDF directly to the Telegram message
 - **AI summary** — optional 2–3 sentence summary of each notification powered by Google Gemini Flash (set `GEMINI_API_KEY` secret to enable)
 - **Multi-recipient** — broadcast to multiple user chats
@@ -71,7 +72,7 @@ The workflow runs automatically every 5 minutes and can also be triggered manual
 On first successful run the bot will:
 - Scrape all current notifications and save them to `seen.json` (without sending alerts)
 - Send you an activation message confirming how many notifications were catalogued
-- From that point on, only **new** notifications trigger alerts
+- From that point on, **new or updated** notifications trigger alerts
 
 ---
 
