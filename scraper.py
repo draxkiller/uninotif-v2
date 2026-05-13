@@ -80,6 +80,22 @@ ADMISSIONS_LIST_PAGES = [
     (f"{ADMISSIONS_BASE_URL}/admissions/index.php", "Admissions Portal 📥"),
 ]
 
+_ADMISSIONS_MIN_TITLE_LEN = 8
+_ADMISSIONS_SKIP_DOMAINS = ("facebook.com", "twitter.com", "instagram.com",
+                            "youtube.com", "linkedin.com", "x.com")
+_ADMISSIONS_GENERIC_TITLES = frozenset({
+    "read more", "click here", "download", "view more", "more details",
+    "contact us", "contact", "home", "about us", "about", "back", "next",
+    "previous", "submit", "apply now", "apply", "register", "login",
+    "sign in", "sign up", "know more", "view all", "see all",
+})
+_ADMISSIONS_CONTENT_CLASS_RE = re.compile(
+    r"entry[._-]content|post[._-]content|content[._-]area|main[._-]content"
+    r"|news[._-]list|notice[._-]board|updates|latest[._-]news"
+    r"|announcement|notification",
+    re.I,
+)
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -700,30 +716,19 @@ def _abs_admissions(href: str) -> str:
 
 def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
     """Scrape the Pondicherry University admissions portal for notification links."""
-    _MIN_TITLE_LEN = 8
-    _SKIP_DOMAINS = ("facebook.com", "twitter.com", "instagram.com",
-                     "youtube.com", "linkedin.com", "x.com")
-    _GENERIC_TITLES = frozenset({
-        "read more", "click here", "download", "view more", "more details",
-        "contact us", "contact", "home", "about us", "about", "back", "next",
-        "previous", "submit", "apply now", "apply", "register", "login",
-        "sign in", "sign up", "know more", "view all", "see all",
-    })
-
     def _is_valid_href(href: str) -> bool:
         href_l = href.lower()
         if href_l.startswith("javascript:") or href_l.startswith("mailto:"):
             return False
         parsed = urlsplit(href_l)
-        netloc = parsed.netloc
-        if any(domain in netloc for domain in _SKIP_DOMAINS):
+        host = parsed.hostname or ""
+        if any(host == domain or host.endswith(f".{domain}") for domain in _ADMISSIONS_SKIP_DOMAINS):
             return False
-        return (
-            "admissions.pondiuni.edu.in" in href_l
-            or "pondiuni.edu.in/admissions" in href_l
-        )
+        if host == "admissions.pondiuni.edu.in":
+            return True
+        return host in {"pondiuni.edu.in", "www.pondiuni.edu.in"} and parsed.path.startswith("/admissions")
 
-    def _is_fragment_of_page(href: str, pg_url: str = page_url) -> bool:
+    def _is_fragment_of_page(href: str, pg_url: str) -> bool:
         return href.split("#")[0].rstrip("/") == pg_url.rstrip("/")
 
     try:
@@ -742,10 +747,7 @@ def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
 
     content = (
         soup.find("main")
-        or soup.find("div", {"class": re.compile(
-            r"entry[._-]content|post[._-]content|content[._-]area|main[._-]content"
-            r"|news[._-]list|notice[._-]board|updates|latest[._-]news"
-            r"|announcement|notification", re.I)})
+        or soup.find("div", {"class": _ADMISSIONS_CONTENT_CLASS_RE})
         or soup
     )
 
@@ -762,15 +764,16 @@ def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
             continue
         href = _abs_admissions(link_tag["href"])
         title = link_tag.get_text(strip=True)
-        if not title or len(title) < _MIN_TITLE_LEN:
+        if not title or len(title) < _ADMISSIONS_MIN_TITLE_LEN:
             continue
-        if title.lower().strip() in _GENERIC_TITLES:
+        normalized_title = title.strip().lower()
+        if normalized_title in _ADMISSIONS_GENERIC_TITLES:
             continue
         if href in seen_links:
             continue
         if not _is_valid_href(href):
             continue
-        if _is_fragment_of_page(href):
+        if _is_fragment_of_page(href, page_url):
             continue
         issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
         date_str = cells[2].get_text(strip=True) if len(cells) > 2 else ""
@@ -791,15 +794,16 @@ def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
             continue
         href = _abs_admissions(link_tag["href"])
         title = link_tag.get_text(strip=True) or li.get_text(strip=True)
-        if not title or len(title) < _MIN_TITLE_LEN:
+        if not title or len(title) < _ADMISSIONS_MIN_TITLE_LEN:
             continue
-        if title.lower().strip() in _GENERIC_TITLES:
+        normalized_title = title.strip().lower()
+        if normalized_title in _ADMISSIONS_GENERIC_TITLES:
             continue
         if href in seen_links:
             continue
         if not _is_valid_href(href):
             continue
-        if _is_fragment_of_page(href):
+        if _is_fragment_of_page(href, page_url):
             continue
         seen_links.add(href)
         results.append({
@@ -815,15 +819,16 @@ def _scrape_admissions_page(page_url: str, category: str) -> list[dict]:
     for a in content.find_all("a", href=True):
         href = _abs_admissions(a["href"])
         title = a.get_text(strip=True)
-        if not title or len(title) < _MIN_TITLE_LEN:
+        if not title or len(title) < _ADMISSIONS_MIN_TITLE_LEN:
             continue
-        if title.lower().strip() in _GENERIC_TITLES:
+        normalized_title = title.strip().lower()
+        if normalized_title in _ADMISSIONS_GENERIC_TITLES:
             continue
         if href in seen_links:
             continue
         if not _is_valid_href(href):
             continue
-        if _is_fragment_of_page(href):
+        if _is_fragment_of_page(href, page_url):
             continue
         seen_links.add(href)
         results.append({
