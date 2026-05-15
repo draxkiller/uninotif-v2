@@ -292,22 +292,7 @@ def _scrape_html() -> list[dict]:
         _extract_rows(soup, "General 🔔", results)
 
     if not results:
-        print("  [HTML] No table rows found — trying link scan fallback")
-        seen_links_fb: set = set()
-        for a in soup.find_all("a", href=True):
-            href = _abs(a["href"])
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-            if href in seen_links_fb:
-                continue
-            if any(skip in href for skip in ["#", "javascript", "mailto", "facebook", "twitter"]):
-                continue
-            seen_links_fb.add(href)
-            results.append({
-                "id": href, "title": title, "link": href,
-                "category": "General 🔔", "issued_by": "", "date": "",
-            })
+        print("  [HTML] No table rows found — page structure may have changed; skipping unsafe link scan")
 
     seen_links, deduped = set(), []
     for n in results:
