@@ -18,6 +18,7 @@ import traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────────────────────
@@ -161,6 +162,21 @@ def _abs(href: str) -> str:
     if href.startswith("/"):
         return BASE_URL + href
     return BASE_URL + "/" + href
+
+
+def _is_allowed_host(url: str, allowed_domains: tuple[str, ...]) -> bool:
+    """Return True if URL host exactly matches or is a subdomain of allowed domains."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    for domain in allowed_domains:
+        d = domain.lower()
+        if host == d or host.endswith("." + d):
+            return True
+    return False
 
 
 def _fmt_wp_date(date_str: str) -> str:
@@ -367,7 +383,7 @@ def _scrape_section_links(section_url: str, category: str) -> list[dict]:
             continue
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        if "pondiuni.edu.in" not in href:
+        if not _is_allowed_host(href, ("pondiuni.edu.in",)):
             continue
         # Only include links that are children of this section (not nav links, etc.)
         if not href.rstrip("/").startswith(section_base + "/"):
@@ -449,7 +465,7 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
             continue
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        if "pondiuni.edu.in" not in href:
+        if not _is_allowed_host(href, ("pondiuni.edu.in",)):
             continue
         issued_by = cells[1].get_text(strip=True) if len(cells) > 1 else ""
         date_str  = cells[2].get_text(strip=True) if len(cells) > 2 else ""
@@ -473,7 +489,7 @@ def _scrape_dde_list_page(page_url: str, category: str) -> list[dict]:
             continue
         if any(skip in href for skip in _SKIP_HREF):
             continue
-        if "pondiuni.edu.in" not in href:
+        if not _is_allowed_host(href, ("pondiuni.edu.in",)):
             continue
         # Skip links that are just the listing page itself
         if href.rstrip("/") == page_url.rstrip("/"):
@@ -525,7 +541,7 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
     # Restrict to NTA-specific domains only — broad .gov.in / .nic.in would
     # pick up unrelated ministry/department navigation links.
     _VALID_DOMAINS = ("nta.nic.in", "exams.nta.nic.in", "cdnbbsr.s3waas.gov.in",
-                      ".ntaexam.ac.in")
+                      "ntaexam.ac.in")
     # Generic UI / navigation phrases that are never real notifications.
     _GENERIC_TITLES = frozenset({
         "read more", "click here", "download", "view more", "more details",
@@ -537,7 +553,7 @@ def _scrape_cuet_pg_page(page_url: str, category: str) -> list[dict]:
     def _is_valid_href(href: str) -> bool:
         if any(skip in href for skip in _SKIP_HREF):
             return False
-        return any(d in href for d in _VALID_DOMAINS)
+        return _is_allowed_host(href, _VALID_DOMAINS)
 
     def _is_fragment_of_page(href: str, pg_url: str = page_url) -> bool:
         """Return True if href is just a fragment/anchor variant of page_url."""
@@ -1087,7 +1103,8 @@ def alert_admin(text: str):
 _DDE_TITLE_RE = re.compile(r'^DDE\s*[–—-]', re.IGNORECASE)
 
 def build_caption(n: dict, summary: str = "") -> str:
-    summary_block = f"\n🤖 <b>AI Summary:</b>\n{summary}\n" if summary else ""
+    safe_summary = html.escape(summary) if summary else ""
+    summary_block = f"\n🤖 <b>AI Summary:</b>\n{safe_summary}\n" if safe_summary else ""
     category = n.get("category", "General")
     # Identify DDE notifications by checking against the known DDE category labels,
     # or by title prefix (e.g. "DDE – …") for items that arrive via the main API.
@@ -1108,16 +1125,22 @@ def build_caption(n: dict, summary: str = "") -> str:
     else:
         institution = "🏛 <b>Pondicherry University</b>"
 
+    safe_category = html.escape(category)
+    safe_title = html.escape(n.get("title", ""))
+    safe_issued_by = html.escape(n.get("issued_by") or "—")
+    safe_date = html.escape(n.get("date") or "—")
+    safe_link = html.escape(n.get("link", ""), quote=True)
+
     return (
         f"🔔 <b>NEW NOTIFICATION</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{institution}\n\n"
-        f"📁 <b>Category :</b> {category}\n"
-        f"📄 <b>Title    :</b> <code>{html.escape(n['title'])}</code>\n"
-        f"🏢 <b>Issued by:</b> {n.get('issued_by') or '—'}\n"
-        f"📅 <b>Date     :</b> {n.get('date') or '—'}"
+        f"📁 <b>Category :</b> {safe_category}\n"
+        f"📄 <b>Title    :</b> <code>{safe_title}</code>\n"
+        f"🏢 <b>Issued by:</b> {safe_issued_by}\n"
+        f"📅 <b>Date     :</b> {safe_date}"
         f"{summary_block}\n"
-        f"🔗 <a href=\"{n['link']}\">Open on Website ↗</a>\n"
+        f"🔗 <a href=\"{safe_link}\">Open on Website ↗</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -1627,6 +1650,42 @@ def _run_tests():
         "https://www.pondiuni.edu.in/wp-content/uploads/b.pdf",
     ]
     _check("tie → first URL wins", choose_primary_pdf_url(urls_equal), urls_equal[0])
+
+    # 8. Host validation allows exact and subdomain matches
+    _check(
+        "host allow exact match",
+        _is_allowed_host("https://exams.nta.nic.in/cuet-pg/", ("exams.nta.nic.in",)),
+        True,
+    )
+    _check(
+        "host allow subdomain suffix",
+        _is_allowed_host("https://cdn.foo.ntaexam.ac.in/file.pdf", ("ntaexam.ac.in",)),
+        True,
+    )
+
+    # 9. Host validation rejects crafted lookalike hostnames
+    _check(
+        "host reject substring lookalike",
+        _is_allowed_host("https://exams.nta.nic.in.attacker.test/x", ("exams.nta.nic.in",)),
+        False,
+    )
+
+    # 10. Caption escapes HTML-sensitive dynamic fields
+    caption = build_caption(
+        {
+            "title": 'A <B>',
+            "link": 'https://example.com/?x="y"',
+            "category": "News & Announcements",
+            "issued_by": "Dept <X>",
+            "date": "01 Jun 2026",
+        },
+        summary="Use <b>tag</b>",
+    )
+    _check("caption escapes title", "<code>A &lt;B&gt;</code>" in caption, True)
+    _check("caption escapes category", "News &amp; Announcements" in caption, True)
+    _check("caption escapes issued_by", "Dept &lt;X&gt;" in caption, True)
+    _check("caption escapes summary", "Use &lt;b&gt;tag&lt;/b&gt;" in caption, True)
+    _check('caption escapes link quotes', 'href="https://example.com/?x=&quot;y&quot;"' in caption, True)
 
     print(f"\n  {passed} passed, {failed} failed")
     sys.exit(0 if failed == 0 else 1)
