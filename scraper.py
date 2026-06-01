@@ -179,6 +179,18 @@ def _is_allowed_host(url: str, allowed_domains: tuple[str, ...]) -> bool:
     return False
 
 
+def _safe_href_url(url: str, fallback: str = NOTIF_URL) -> str:
+    """Return an HTML-escaped http(s) URL safe for href; fallback when invalid."""
+    try:
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme in ("http", "https") and parsed.netloc:
+            return html.escape(url, quote=True)
+    except Exception:
+        pass
+    return html.escape(fallback, quote=True)
+
+
 def _fmt_wp_date(date_str: str) -> str:
     """Format a WP REST API date string (2024-01-15T10:30:00) to readable form."""
     try:
@@ -1103,8 +1115,7 @@ def alert_admin(text: str):
 _DDE_TITLE_RE = re.compile(r'^DDE\s*[–—-]', re.IGNORECASE)
 
 def build_caption(n: dict, summary: str = "") -> str:
-    safe_summary = html.escape(summary) if summary else ""
-    summary_block = f"\n🤖 <b>AI Summary:</b>\n{safe_summary}\n" if safe_summary else ""
+    summary_block = f"\n🤖 <b>AI Summary:</b>\n{html.escape(summary)}\n" if summary else ""
     category = n.get("category", "General")
     # Identify DDE notifications by checking against the known DDE category labels,
     # or by title prefix (e.g. "DDE – …") for items that arrive via the main API.
@@ -1129,7 +1140,7 @@ def build_caption(n: dict, summary: str = "") -> str:
     safe_title = html.escape(n.get("title", ""))
     safe_issued_by = html.escape(n.get("issued_by") or "—")
     safe_date = html.escape(n.get("date") or "—")
-    safe_link = html.escape(n.get("link", ""), quote=True)
+    safe_link = _safe_href_url(n.get("link", ""))
 
     return (
         f"🔔 <b>NEW NOTIFICATION</b>\n"
@@ -1670,7 +1681,19 @@ def _run_tests():
         False,
     )
 
-    # 10. Caption escapes HTML-sensitive dynamic fields
+    # 10. Href safety helper accepts http(s), rejects unsafe schemes
+    _check(
+        "safe href keeps https link",
+        _safe_href_url("https://example.com/?x=\"y\""),
+        "https://example.com/?x=&quot;y&quot;",
+    )
+    _check(
+        "safe href falls back for javascript scheme",
+        _safe_href_url("javascript:alert(1)"),
+        html.escape(NOTIF_URL, quote=True),
+    )
+
+    # 11. Caption escapes HTML-sensitive dynamic fields
     caption = build_caption(
         {
             "title": 'A <B>',
