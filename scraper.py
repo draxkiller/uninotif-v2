@@ -94,10 +94,11 @@ TAB_SLUGS = {
 
 # Extra pages to scrape for section-specific notifications.
 # These are WordPress section pages whose child links are treated as notifications.
-# Note: /admission/ and /directorate-of-distance-education/ were removed — both
-# return 404.  Admission posts are covered by the WP REST API; distance-education
-# notifications are covered by DDE_LIST_PAGES above.
-EXTRA_SECTIONS: list[tuple[str, str]] = []
+# Admission links under /admission/... are collected from the section page in
+# addition to the regular feeds so those notices are not missed.
+EXTRA_SECTIONS: list[tuple[str, str]] = [
+    (f"{BASE_URL}/admission/", "Admission 🏫"),
+]
 
 # Manual fallback links for notifications that may not appear in the scraped
 # feeds but should still be delivered once.
