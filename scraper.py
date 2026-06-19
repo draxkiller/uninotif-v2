@@ -101,9 +101,10 @@ EXTRA_SECTIONS: list[tuple[str, str]] = []
 
 # Manual fallback links for notifications that may not appear in the scraped
 # feeds but should still be delivered once.
-MANUAL_NOTIFICATION_LINKS: list[tuple[str, str]] = [
+MANUAL_NOTIFICATION_LINKS: list[tuple[str, str, str]] = [
     (
         "https://www.pondiuni.edu.in/admission/admissions-2026-27-physical-fitness-tests-and-games-proficiency-test-for-m-p-ed-intimation-letter/",
+        "Admissions 2026-27 Physical Fitness Tests and Games Proficiency Test for M.P.Ed - Intimation Letter",
         "Admission 🏫",
     ),
 ]
@@ -243,11 +244,9 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
                 existing_links.add(item["link"])
 
     # Include manually curated fallback links.
-    for url, category in MANUAL_NOTIFICATION_LINKS:
+    for url, title, category in MANUAL_NOTIFICATION_LINKS:
         if url in (seen_ids or set()) or url in existing_links:
             continue
-        slug = url.rstrip("/").split("/")[-1]
-        title = re.sub(r"[-_]+", " ", slug).strip().title() or url
         results.append({
             "id": url,
             "title": title,
