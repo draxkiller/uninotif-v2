@@ -94,10 +94,21 @@ TAB_SLUGS = {
 
 # Extra pages to scrape for section-specific notifications.
 # These are WordPress section pages whose child links are treated as notifications.
-# Note: /admission/ and /directorate-of-distance-education/ were removed — both
-# return 404.  Admission posts are covered by the WP REST API; distance-education
-# notifications are covered by DDE_LIST_PAGES above.
-EXTRA_SECTIONS: list[tuple[str, str]] = []
+# Admission links under /admission/... are collected from the section page in
+# addition to the regular feeds so those notices are not missed.
+EXTRA_SECTIONS: list[tuple[str, str]] = [
+    (f"{BASE_URL}/admission/", "Admission 🏫"),
+]
+
+# Manual fallback links for notifications that may not appear in the scraped
+# feeds but should still be delivered once.
+MANUAL_NOTIFICATION_LINKS: list[tuple[str, str, str]] = [
+    (
+        "https://www.pondiuni.edu.in/admission/admissions-2026-27-physical-fitness-tests-and-games-proficiency-test-for-m-p-ed-intimation-letter/",
+        "Admissions 2026-27 Physical Fitness Tests and Games Proficiency Test for M.P.Ed - Intimation Letter",
+        "Admission 🏫",
+    ),
+]
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
@@ -201,6 +212,7 @@ def _fmt_wp_date(date_str: str) -> str:
 
 
 def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
+    known_ids = seen_ids or set()
     results = _try_wp_rest_api(seen_ids)
     if results is not None:
         print(f"  [API]  {len(results)} notifications via WP REST API")
@@ -213,7 +225,7 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for section_url, category in EXTRA_SECTIONS:
         extras = _scrape_section_links(section_url, category)
         for item in extras:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["id"] not in known_ids and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -221,7 +233,7 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for dde_url, category in DDE_LIST_PAGES:
         dde_items = _scrape_dde_list_page(dde_url, category)
         for item in dde_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["id"] not in known_ids and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -229,9 +241,23 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for cuet_url, category in CUET_PG_LIST_PAGES:
         cuet_items = _scrape_cuet_pg_page(cuet_url, category)
         for item in cuet_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["id"] not in known_ids and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
+
+    # Include manually curated fallback links.
+    for url, title, category in MANUAL_NOTIFICATION_LINKS:
+        if url in known_ids or url in existing_links:
+            continue
+        results.append({
+            "id": url,
+            "title": title,
+            "link": url,
+            "category": category,
+            "issued_by": "",
+            "date": "",
+        })
+        existing_links.add(url)
 
     return results
 
