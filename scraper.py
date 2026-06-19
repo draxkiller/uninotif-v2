@@ -212,6 +212,7 @@ def _fmt_wp_date(date_str: str) -> str:
 
 
 def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
+    known_ids = seen_ids or set()
     results = _try_wp_rest_api(seen_ids)
     if results is not None:
         print(f"  [API]  {len(results)} notifications via WP REST API")
@@ -224,7 +225,7 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for section_url, category in EXTRA_SECTIONS:
         extras = _scrape_section_links(section_url, category)
         for item in extras:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["id"] not in known_ids and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -232,7 +233,7 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for dde_url, category in DDE_LIST_PAGES:
         dde_items = _scrape_dde_list_page(dde_url, category)
         for item in dde_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["id"] not in known_ids and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
@@ -240,13 +241,13 @@ def fetch_all_notifications(seen_ids: set | None = None) -> list[dict]:
     for cuet_url, category in CUET_PG_LIST_PAGES:
         cuet_items = _scrape_cuet_pg_page(cuet_url, category)
         for item in cuet_items:
-            if item["id"] not in (seen_ids or set()) and item["link"] not in existing_links:
+            if item["id"] not in known_ids and item["link"] not in existing_links:
                 results.append(item)
                 existing_links.add(item["link"])
 
     # Include manually curated fallback links.
     for url, title, category in MANUAL_NOTIFICATION_LINKS:
-        if url in (seen_ids or set()) or url in existing_links:
+        if url in known_ids or url in existing_links:
             continue
         results.append({
             "id": url,
